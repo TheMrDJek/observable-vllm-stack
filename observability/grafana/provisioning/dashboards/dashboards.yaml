@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: Local LLM stack
+    orgId: 1
+    folder: Local LLM
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

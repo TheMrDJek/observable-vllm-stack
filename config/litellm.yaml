@@ -1,0 +1,36 @@
+model_list:
+  - model_name: qwen3.5-4b-awq
+    litellm_params:
+      model: openai/qwen3.5-4b-awq
+      api_base: http://vllm-main:8000/v1
+      api_key: os.environ/VLLM_API_KEY
+      timeout: 600
+
+  - model_name: qwen3-4b-awq
+    litellm_params:
+      model: openai/qwen3-4b-awq
+      api_base: http://vllm-alt:8000/v1
+      api_key: os.environ/VLLM_API_KEY
+      timeout: 600
+
+litellm_settings:
+  callbacks:
+    - prometheus
+    - otel
+  drop_params: true
+  request_timeout: 600
+  set_verbose: false
+  require_auth_for_metrics_endpoint: false
+
+router_settings:
+  enable_pre_call_checks: true
+  routing_strategy: simple-shuffle
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+  store_prompts_in_spend_logs: true
+  maximum_spend_logs_retention_period: "30d"
+  maximum_spend_logs_retention_interval: "1d"
+  otel: true
+  health_check_interval: 30

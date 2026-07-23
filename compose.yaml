@@ -1,0 +1,278 @@
+name: ai-vllm-stack
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: ${DOCKER_LOG_MAX_SIZE:-10m}
+    max-file: ${DOCKER_LOG_MAX_FILES:-3}
+
+x-vllm-common: &vllm-common
+  image: ${VLLM_IMAGE:-vllm/vllm-openai:nightly}
+  ipc: host
+  volumes:
+    - ./data/huggingface:/root/.cache/huggingface
+  environment:
+    HF_TOKEN: ${HF_TOKEN:-}
+  networks:
+    - backend
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+  healthcheck:
+    test:
+      - CMD-SHELL
+      - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"
+    interval: 15s
+    timeout: 5s
+    retries: 40
+    start_period: 15m
+  logging: *default-logging
+  restart: unless-stopped
+
+services:
+  vllm-main:
+    <<: *vllm-common
+    profiles: [main]
+    command:
+      - ${MAIN_MODEL_ID:-QuantTrio/Qwen3.5-4B-AWQ}
+      - --served-model-name
+      - qwen3.5-4b-awq
+      - --max-model-len
+      - ${MAIN_VLLM_MAX_MODEL_LEN:-8192}
+      - --gpu-memory-utilization
+      - ${MAIN_VLLM_GPU_MEMORY_UTILIZATION:-0.85}
+      - --cpu-offload-gb
+      - ${MAIN_CPU_OFFLOAD_GB:-0}
+      - --enforce-eager
+      - --reasoning-parser
+      - ${MAIN_REASONING_PARSER:-qwen3}
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - ${MAIN_TOOL_CALL_PARSER:-qwen3_coder}
+      - --limit-mm-per-prompt.image
+      - ${MAIN_MAX_IMAGES:-2}
+    ports:
+      - "127.0.0.1:${MAIN_VLLM_PORT:-8001}:8000"
+
+  vllm-alt:
+    <<: *vllm-common
+    profiles: [alt]
+    command:
+      - ${ALT_MODEL_ID:-Qwen/Qwen3-4B-AWQ}
+      - --served-model-name
+      - qwen3-4b-awq
+      - --max-model-len
+      - ${ALT_MAX_MODEL_LEN:-16384}
+      - --gpu-memory-utilization
+      - ${ALT_VLLM_GPU_MEMORY_UTILIZATION:-0.85}
+      - --reasoning-parser
+      - ${ALT_REASONING_PARSER:-qwen3}
+    ports:
+      - "127.0.0.1:${ALT_VLLM_PORT:-8002}:8000"
+
+  postgres:
+    image: postgres:${POSTGRES_VERSION:-17-alpine}
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-litellm}
+      POSTGRES_USER: ${POSTGRES_USER:-litellm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U ${POSTGRES_USER:-litellm} -d ${POSTGRES_DB:-litellm}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *default-logging
+    restart: unless-stopped
+
+  litellm:
+    image: ghcr.io/berriai/litellm:${LITELLM_VERSION:-v1.90.5}
+    command: [--config, /app/config.yaml, --port, "4000", --num_workers, "1"]
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-litellm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-litellm}
+      VLLM_API_KEY: ${VLLM_API_KEY:-local-vllm}
+      OTEL_EXPORTER: otlp_grpc
+      OTEL_ENDPOINT: http://alloy:4317
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://alloy:4317
+    volumes:
+      - ./config/litellm.yaml:/app/config.yaml:ro
+    ports:
+      - "127.0.0.1:${LITELLM_PORT:-4000}:4000"
+    networks:
+      - backend
+      - frontend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    logging: *default-logging
+    restart: unless-stopped
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:${OPEN_WEBUI_VERSION:-v0.10.2}
+    environment:
+      OPENAI_API_BASE_URLS: http://litellm:4000/v1
+      OPENAI_API_KEYS: ${LITELLM_MASTER_KEY}
+      ENABLE_OLLAMA_API: "false"
+      ENABLE_OTEL: "true"
+      ENABLE_OTEL_TRACES: "true"
+      ENABLE_OTEL_METRICS: "true"
+      ENABLE_OTEL_LOGS: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://alloy:4317
+      OTEL_METRICS_EXPORTER_OTLP_ENDPOINT: http://alloy:4317
+      OTEL_LOGS_EXPORTER_OTLP_ENDPOINT: http://alloy:4317
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
+      OTEL_SERVICE_NAME: open-webui
+    volumes:
+      - open-webui-data:/app/backend/data
+    ports:
+      - "127.0.0.1:${OPEN_WEBUI_PORT:-3000}:8080"
+    networks:
+      - frontend
+      - backend
+    depends_on:
+      litellm:
+        condition: service_healthy
+      alloy:
+        condition: service_started
+    logging: *default-logging
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:${PROMETHEUS_VERSION:-v3.4.1}
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-30d}
+      - --storage.tsdb.retention.size=${PROMETHEUS_RETENTION_SIZE:-10GB}
+      - --web.enable-remote-write-receiver
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    networks:
+      - backend
+    logging: *default-logging
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:${LOKI_VERSION:-3.5.1}
+    command: [-config.file=/etc/loki/config.yaml]
+    volumes:
+      - ./observability/loki.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+    networks:
+      - backend
+    logging: *default-logging
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:${TEMPO_VERSION:-2.8.1}
+    command: [-config.file=/etc/tempo/config.yaml]
+    volumes:
+      - ./observability/tempo.yaml:/etc/tempo/config.yaml:ro
+      - tempo-data:/var/tempo
+    networks:
+      - backend
+    logging: *default-logging
+    restart: unless-stopped
+
+  alloy:
+    image: grafana/alloy:${ALLOY_VERSION:-v1.17.1}
+    privileged: true
+    environment:
+      ALLOY_DEPLOY_MODE: docker
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./observability/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc:/rootproc:ro
+      - /sys:/sys:ro
+      - /:/rootfs:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - alloy-data:/var/lib/alloy/data
+    ports:
+      - "127.0.0.1:${ALLOY_PORT:-12345}:12345"
+    networks:
+      - backend
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    logging: *default-logging
+    restart: unless-stopped
+
+  nvidia-gpu-exporter:
+    image: utkuozdemir/nvidia_gpu_exporter:${NVIDIA_EXPORTER_VERSION:-1.3.2}
+    profiles: [gpu-metrics]
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - backend
+    logging: *default-logging
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:${GRAFANA_VERSION:-13.1.1}
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3001}:3000"
+    networks:
+      - backend
+      - frontend
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    logging: *default-logging
+    restart: unless-stopped
+
+networks:
+  frontend:
+  backend:
+    internal: false
+
+volumes:
+  postgres-data:
+  open-webui-data:
+  prometheus-data:
+  loki-data:
+  tempo-data:
+  alloy-data:
+  grafana-data:

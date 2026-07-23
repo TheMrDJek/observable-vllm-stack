@@ -1,0 +1,230 @@
+@gatewayUrl = http://localhost:4000
+@baseUrl = {{gatewayUrl}}/v1
+@apiKey = LITELLM_MASTER_KEY
+@model = qwen3.5-4b-awq
+@imageUrl = https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/stop_sign.jpg
+
+# СПРАВОЧНИК ПО CHAT COMPLETIONS
+#
+# model               API-имя модели из GET /v1/models.
+# messages            Полная история диалога. API не помнит предыдущие запросы.
+# role=system          Инструкции и ограничения приложения. Передавайте из backend,
+#                      если поведение должно быть одинаковым вне Open WebUI.
+# role=user            Сообщение пользователя.
+# role=assistant       Предыдущий ответ модели при продолжении диалога.
+# role=tool            Результат функции, вызванной по tool_calls модели.
+# temperature          Случайность ответа: 0-0.2 для кода/JSON, 0.6-0.9 для творчества.
+# top_p                Альтернативное управление случайностью. Обычно меняют либо
+#                      temperature, либо top_p, но не оба одновременно.
+# max_tokens           Максимум новых токенов ответа; prompt в этот лимит не входит.
+# stream               true возвращает ответ частями в формате SSE.
+# stop                 Строка или массив строк, на которых генерация останавливается.
+# seed                 Попытка повторяемой генерации; не гарантирует побитовый результат.
+# presence_penalty     Снижает повторение уже встречавшихся тем.
+# frequency_penalty    Снижает дословные повторы токенов.
+# tools                JSON Schema функций, которые модель может предложить вызвать.
+# tool_choice=auto     Модель сама решает, нужен ли инструмент.
+#
+# Контекст модели ограничен MAIN_VLLM_MAX_MODEL_LEN. В него входят system prompt,
+# вся история, описания tools, изображения и генерируемый ответ.
+# Не передавайте пароль или токен в messages: prompts и responses хранятся 30 дней.
+
+### LiteLLM liveliness
+GET {{gatewayUrl}}/health/liveliness
+
+### Available models
+GET {{baseUrl}}/models
+Authorization: Bearer {{apiKey}}
+
+### Text chat completion
+POST {{baseUrl}}/chat/completions
+Authorization: Bearer {{apiKey}}
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "messages": [
+    {
+      "role": "system",
+      "content": "Ты технический помощник. Отвечай по-русски, кратко и только по существу."
+    },
+    {
+      "role": "user",
+      "content": "Ответь одним коротким предложением: API работает?"
+    }
+  ],
+  "temperature": 0.2,
+  "top_p": 1,
+  "max_tokens": 128
+}
+
+### Streaming chat completion
+POST {{baseUrl}}/chat/completions
+Authorization: Bearer {{apiKey}}
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Назови три преимущества локального запуска LLM."
+    }
+  ],
+  "stream": true,
+  "temperature": 0.2,
+  "max_tokens": 256
+}
+
+### Continue a conversation: the client sends the complete history
+POST {{baseUrl}}/chat/completions
+Authorization: Bearer {{apiKey}}
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "messages": [
+    {
+      "role": "system",
+      "content": "Ты помощник по Docker. Не придумывай команды, которых не существует."
+    },
+    {
+      "role": "user",
+      "content": "Как посмотреть запущенные Compose-сервисы?"
+    },
+    {
+      "role": "assistant",
+      "content": "Выполните docker compose ps."
+    },
+    {
+      "role": "user",
+      "content": "А как включить вывод остановленных контейнеров?"
+    }
+  ],
+  "temperature": 0.1,
+  "max_tokens": 128
+}
+
+### Vision request
+POST {{baseUrl}}/chat/completions
+Authorization: Bearer {{apiKey}}
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Что изображено на картинке?"
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "{{imageUrl}}"
+          }
+        }
+      ]
+    }
+  ],
+  "temperature": 0.2,
+  "max_tokens": 256
+}
+
+# Ответ на этот запрос может содержать choices[0].message.tool_calls.
+# LiteLLM и vLLM не вызывают функцию сами: это обязанность клиентского приложения.
+### Automatic tool choice
+POST {{baseUrl}}/chat/completions
+Authorization: Bearer {{apiKey}}
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Какая сейчас погода в Москве?"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Возвращает текущую погоду для города",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string",
+              "description": "Название города"
+            }
+          },
+          "required": [
+            "city"
+          ]
+        }
+      }
+    }
+  ],
+  "tool_choice": "auto",
+  "temperature": 0,
+  "max_tokens": 256
+}
+
+### Send a tool result back to the model
+POST {{baseUrl}}/chat/completions
+Authorization: Bearer {{apiKey}}
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Какая сейчас погода в Москве?"
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_weather_1",
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "arguments": "{\"city\":\"Москва\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_weather_1",
+      "content": "{\"temperature_c\":24,\"condition\":\"ясно\"}"
+    }
+  ],
+  "temperature": 0,
+  "max_tokens": 128
+}
+
+### Expected error: invalid API key
+GET {{baseUrl}}/models
+Authorization: Bearer sk-invalid
+
+### Expected error: unknown model
+POST {{baseUrl}}/chat/completions
+Authorization: Bearer {{apiKey}}
+Content-Type: application/json
+
+{
+  "model": "model-does-not-exist",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Этот запрос должен завершиться ошибкой."
+    }
+  ]
+}
