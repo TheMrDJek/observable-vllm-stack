@@ -7,12 +7,14 @@ x-logging: &default-logging
     max-file: ${DOCKER_LOG_MAX_FILES:-3}
 
 x-vllm-common: &vllm-common
-  image: ${VLLM_IMAGE:-vllm/vllm-openai:nightly}
+  image: ${VLLM_IMAGE:-vllm/vllm-openai@sha256:24f2f8975d011ea7f7066a547886a08a1fd3c4bf0880463487fae4f01ce723c6}
   ipc: host
   volumes:
     - ./data/huggingface:/root/.cache/huggingface
   environment:
     HF_TOKEN: ${HF_TOKEN:-}
+    HF_HUB_DISABLE_TELEMETRY: "1"
+    VLLM_MEDIA_URL_ALLOW_REDIRECTS: "0"
   networks:
     - backend
   deploy:
@@ -39,8 +41,12 @@ services:
     profiles: [main]
     command:
       - ${MAIN_MODEL_ID:-QuantTrio/Qwen3.5-4B-AWQ}
+      - --revision
+      - ${MAIN_MODEL_REVISION:-32c292e3a73afe1138518180b1b6d2868c980ee2}
       - --served-model-name
-      - qwen3.5-4b-awq
+      - ${MAIN_SERVED_MODEL_NAME:-qwen3.5-4b-awq}
+      - --api-key
+      - ${VLLM_API_KEY}
       - --max-model-len
       - ${MAIN_VLLM_MAX_MODEL_LEN:-8192}
       - --gpu-memory-utilization
@@ -55,6 +61,8 @@ services:
       - ${MAIN_TOOL_CALL_PARSER:-qwen3_coder}
       - --limit-mm-per-prompt.image
       - ${MAIN_MAX_IMAGES:-2}
+      - --allowed-media-domains
+      - ${VLLM_ALLOWED_MEDIA_DOMAINS:-media.invalid}
     ports:
       - "127.0.0.1:${MAIN_VLLM_PORT:-8001}:8000"
 
@@ -63,8 +71,12 @@ services:
     profiles: [alt]
     command:
       - ${ALT_MODEL_ID:-Qwen/Qwen3-4B-AWQ}
+      - --revision
+      - ${ALT_MODEL_REVISION:-74d4bd2bd4bff9cafc9345221320bffb08b406a3}
       - --served-model-name
-      - qwen3-4b-awq
+      - ${ALT_SERVED_MODEL_NAME:-qwen3-4b-awq}
+      - --api-key
+      - ${VLLM_API_KEY}
       - --max-model-len
       - ${ALT_MAX_MODEL_LEN:-16384}
       - --gpu-memory-utilization
@@ -103,13 +115,17 @@ services:
       OTEL_EXPORTER: otlp_grpc
       OTEL_ENDPOINT: http://alloy:4317
       OTEL_EXPORTER_OTLP_ENDPOINT: http://alloy:4317
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-1.0}
+      STORE_PROMPTS_IN_SPEND_LOGS: ${STORE_PROMPTS_IN_SPEND_LOGS:-false}
     volumes:
       - ./config/litellm.yaml:/app/config.yaml:ro
     ports:
       - "127.0.0.1:${LITELLM_PORT:-4000}:4000"
     networks:
       - backend
-      - frontend
+      - edge
     depends_on:
       postgres:
         condition: service_healthy
@@ -128,34 +144,87 @@ services:
     image: ghcr.io/open-webui/open-webui:${OPEN_WEBUI_VERSION:-v0.10.2}
     environment:
       OPENAI_API_BASE_URLS: http://litellm:4000/v1
-      OPENAI_API_KEYS: ${LITELLM_MASTER_KEY}
+      OPENAI_API_KEYS: ${OPEN_WEBUI_LITELLM_KEY:-}
       ENABLE_OLLAMA_API: "false"
       ENABLE_OTEL: "true"
       ENABLE_OTEL_TRACES: "true"
-      ENABLE_OTEL_METRICS: "true"
-      ENABLE_OTEL_LOGS: "true"
+      ENABLE_OTEL_METRICS: "false"
+      ENABLE_OTEL_LOGS: "false"
       OTEL_EXPORTER_OTLP_ENDPOINT: http://alloy:4317
-      OTEL_METRICS_EXPORTER_OTLP_ENDPOINT: http://alloy:4317
-      OTEL_LOGS_EXPORTER_OTLP_ENDPOINT: http://alloy:4317
       OTEL_EXPORTER_OTLP_INSECURE: "true"
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-1.0}
       OTEL_SERVICE_NAME: open-webui
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}
+      ENABLE_SIGNUP: ${WEBUI_ENABLE_SIGNUP:-false}
+      ENABLE_PERSISTENT_CONFIG: "false"
     volumes:
       - open-webui-data:/app/backend/data
     ports:
       - "127.0.0.1:${OPEN_WEBUI_PORT:-3000}:8080"
     networks:
-      - frontend
       - backend
+      - edge
     depends_on:
       litellm:
         condition: service_healthy
       alloy:
         condition: service_started
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    logging: *default-logging
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:${CADDY_VERSION:-2.10.2-alpine}
+    profiles: [gateway]
+    environment:
+      PUBLIC_API_HOST: ${PUBLIC_API_HOST}
+      PUBLIC_CHAT_HOST: ${PUBLIC_CHAT_HOST}
+      OLD_PUBLIC_API_HOST: ${OLD_PUBLIC_API_HOST:-}
+      OLD_PUBLIC_CHAT_HOST: ${OLD_PUBLIC_CHAT_HOST:-}
+      TLS_CERT_FILE: ${TLS_CERT_FILE:-server.crt}
+      TLS_KEY_FILE: ${TLS_KEY_FILE:-server.key}
+    volumes:
+      - ${CADDY_CONFIG_FILE:-./caddy/Caddyfile.internal}:/etc/caddy/Caddyfile:ro
+      - ./caddy/routes.caddy:/etc/caddy/routes.caddy:ro
+      - ${TLS_CERTS_DIR:-./secrets/caddy}:/etc/caddy/certs:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    ports:
+      - "${PUBLIC_BIND_ADDRESS:-0.0.0.0}:${PUBLIC_HTTPS_PORT:-443}:8443"
+    networks:
+      - edge
+    depends_on:
+      litellm:
+        condition: service_healthy
+      open-webui:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD-SHELL, "wget -q -O /dev/null http://127.0.0.1:2019/config/"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     logging: *default-logging
     restart: unless-stopped
 
   prometheus:
     image: prom/prometheus:${PROMETHEUS_VERSION:-v3.4.1}
+    profiles: [local-observability]
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
@@ -174,6 +243,7 @@ services:
 
   loki:
     image: grafana/loki:${LOKI_VERSION:-3.5.1}
+    profiles: [local-observability]
     command: [-config.file=/etc/loki/config.yaml]
     volumes:
       - ./observability/loki.yaml:/etc/loki/config.yaml:ro
@@ -185,6 +255,7 @@ services:
 
   tempo:
     image: grafana/tempo:${TEMPO_VERSION:-2.8.1}
+    profiles: [local-observability]
     command: [-config.file=/etc/tempo/config.yaml]
     volumes:
       - ./observability/tempo.yaml:/etc/tempo/config.yaml:ro
@@ -199,27 +270,35 @@ services:
     privileged: true
     environment:
       ALLOY_DEPLOY_MODE: docker
+      DEPLOYMENT_ID: ${DEPLOYMENT_ID:-ai-vllm-stack}
+      ENVIRONMENT: ${ENVIRONMENT:-pilot}
+      SITE: ${SITE:-local}
+      INSTANCE_ID: ${INSTANCE_ID:-vlm-host}
+      REMOTE_METRICS_URL: ${REMOTE_METRICS_URL:-}
+      REMOTE_METRICS_TOKEN: ${REMOTE_METRICS_TOKEN:-}
+      REMOTE_LOKI_URL: ${REMOTE_LOKI_URL:-}
+      REMOTE_LOKI_TOKEN: ${REMOTE_LOKI_TOKEN:-}
+      REMOTE_TEMPO_ENDPOINT: ${REMOTE_TEMPO_ENDPOINT:-}
+      REMOTE_TEMPO_TOKEN: ${REMOTE_TEMPO_TOKEN:-}
+      REMOTE_CA_FILE: ${REMOTE_CA_FILE:-/etc/ssl/certs/ca-certificates.crt}
     command:
       - run
       - --server.http.listen-addr=0.0.0.0:12345
       - --storage.path=/var/lib/alloy/data
       - /etc/alloy/config.alloy
     volumes:
-      - ./observability/config.alloy:/etc/alloy/config.alloy:ro
+      - ${ALLOY_CONFIG_FILE:-./observability/config.alloy}:/etc/alloy/config.alloy:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /proc:/rootproc:ro
       - /sys:/sys:ro
       - /:/rootfs:ro
       - /var/lib/docker:/var/lib/docker:ro
+      - ${REMOTE_CA_DIR:-./secrets/remote-ca}:/etc/alloy/remote-ca:ro
       - alloy-data:/var/lib/alloy/data
     ports:
       - "127.0.0.1:${ALLOY_PORT:-12345}:12345"
     networks:
       - backend
-    depends_on:
-      - prometheus
-      - loki
-      - tempo
     logging: *default-logging
     restart: unless-stopped
 
@@ -243,6 +322,7 @@ services:
 
   grafana:
     image: grafana/grafana:${GRAFANA_VERSION:-13.1.1}
+    profiles: [local-observability]
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
@@ -255,7 +335,6 @@ services:
       - "127.0.0.1:${GRAFANA_PORT:-3001}:3000"
     networks:
       - backend
-      - frontend
     depends_on:
       - prometheus
       - loki
@@ -264,7 +343,7 @@ services:
     restart: unless-stopped
 
 networks:
-  frontend:
+  edge:
   backend:
     internal: false
 
@@ -276,3 +355,5 @@ volumes:
   tempo-data:
   alloy-data:
   grafana-data:
+  caddy-data:
+  caddy-config:

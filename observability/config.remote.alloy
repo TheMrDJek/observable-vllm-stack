@@ -3,8 +3,10 @@ logging {
   format = "logfmt"
 }
 
-prometheus.relabel "local" {
-  forward_to = [prometheus.remote_write.local.receiver]
+// Metrics are normalized before remote_write. Fixed stand labels come from the
+// deployment environment; service and model_slot stay bounded to known values.
+prometheus.relabel "remote" {
+  forward_to = [prometheus.remote_write.remote.receiver]
 
   rule {
     action = "labeldrop"
@@ -12,7 +14,7 @@ prometheus.relabel "local" {
   }
 }
 
-prometheus.remote_write "local" {
+prometheus.remote_write "remote" {
   external_labels = {
     deployment  = sys.env("DEPLOYMENT_ID"),
     environment = sys.env("ENVIRONMENT"),
@@ -21,7 +23,13 @@ prometheus.remote_write "local" {
   }
 
   endpoint {
-    url = "http://prometheus:9090/api/v1/write"
+    url          = sys.env("REMOTE_METRICS_URL")
+    bearer_token = sys.env("REMOTE_METRICS_TOKEN")
+
+    tls_config {
+      ca_file     = sys.env("REMOTE_CA_FILE")
+      min_version = "TLS12"
+    }
   }
 }
 
@@ -53,10 +61,12 @@ discovery.relabel "cadvisor" {
 prometheus.scrape "cadvisor" {
   job_name        = "cadvisor"
   targets         = discovery.relabel.cadvisor.output
-  forward_to      = [prometheus.relabel.local.receiver]
+  forward_to      = [prometheus.relabel.remote.receiver]
   scrape_interval = "15s"
 }
 
+// prometheus.exporter.unix is supported on the target Ubuntu host. Restricting
+// collectors keeps the host baseline predictable and avoids optional services.
 prometheus.exporter.unix "host" {
   procfs_path = "/rootproc"
   rootfs_path = "/rootfs"
@@ -96,7 +106,7 @@ discovery.relabel "host" {
 prometheus.scrape "host" {
   job_name        = "host"
   targets         = discovery.relabel.host.output
-  forward_to      = [prometheus.relabel.local.receiver]
+  forward_to      = [prometheus.relabel.remote.receiver]
   scrape_interval = "15s"
 }
 
@@ -108,10 +118,12 @@ prometheus.scrape "litellm" {
     "model_slot"  = "none",
     "service"     = "litellm",
   }]
-  forward_to      = [prometheus.relabel.local.receiver]
+  forward_to      = [prometheus.relabel.remote.receiver]
   scrape_interval = "15s"
 }
 
+// Profile targets are deliberately static. If a model profile is inactive,
+// Alloy keeps running and reports that target as up=0.
 prometheus.scrape "vllm_main" {
   job_name = "vllm-main"
   targets = [{
@@ -120,7 +132,7 @@ prometheus.scrape "vllm_main" {
     "model_slot"  = "main",
     "service"     = "vllm-main",
   }]
-  forward_to      = [prometheus.relabel.local.receiver]
+  forward_to      = [prometheus.relabel.remote.receiver]
   scrape_interval = "15s"
 }
 
@@ -132,7 +144,7 @@ prometheus.scrape "vllm_alt" {
     "model_slot"  = "alt",
     "service"     = "vllm-alt",
   }]
-  forward_to      = [prometheus.relabel.local.receiver]
+  forward_to      = [prometheus.relabel.remote.receiver]
   scrape_interval = "15s"
 }
 
@@ -144,7 +156,7 @@ prometheus.scrape "gpu" {
     "model_slot"  = "none",
     "service"     = "nvidia-gpu-exporter",
   }]
-  forward_to      = [prometheus.relabel.local.receiver]
+  forward_to      = [prometheus.relabel.remote.receiver]
   scrape_interval = "15s"
 }
 
@@ -156,7 +168,7 @@ prometheus.scrape "alloy" {
     "model_slot"  = "none",
     "service"     = "alloy",
   }]
-  forward_to      = [prometheus.relabel.local.receiver]
+  forward_to      = [prometheus.relabel.remote.receiver]
   scrape_interval = "15s"
 }
 
@@ -166,12 +178,6 @@ discovery.docker "local" {
 
 discovery.relabel "docker_logs" {
   targets = []
-
-  rule {
-    source_labels = ["__meta_docker_container_name"]
-    regex         = "/(.*)"
-    target_label  = "container"
-  }
 
   rule {
     target_label = "service"
@@ -195,33 +201,38 @@ discovery.relabel "docker_logs" {
     target_label  = "model_slot"
     replacement   = "$1"
   }
-
-  rule {
-    target_label = "instance"
-    replacement  = sys.env("INSTANCE_ID")
-  }
 }
 
 loki.source.docker "local" {
   host          = "unix:///var/run/docker.sock"
   targets       = discovery.docker.local.targets
-  labels = {
+  labels        = {}
+  relabel_rules = discovery.relabel.docker_logs.rules
+  forward_to    = [loki.write.remote.receiver]
+}
+
+loki.write "remote" {
+  external_labels = {
     deployment  = sys.env("DEPLOYMENT_ID"),
     environment = sys.env("ENVIRONMENT"),
     site        = sys.env("SITE"),
+    instance    = sys.env("INSTANCE_ID"),
   }
-  relabel_rules = discovery.relabel.docker_logs.rules
-  forward_to    = [loki.write.local.receiver]
-}
 
-loki.write "local" {
   endpoint {
-    url = "http://loki:3100/loki/api/v1/push"
+    url          = sys.env("REMOTE_LOKI_URL")
+    bearer_token = sys.env("REMOTE_LOKI_TOKEN")
+
+    tls_config {
+      ca_file     = sys.env("REMOTE_CA_FILE")
+      min_version = "TLS12"
+    }
   }
 }
 
-// Apps send OTLP traces only. Metrics come from Prometheus scrapes; logs from Docker.
-otelcol.receiver.otlp "local" {
+// Applications may connect over OTLP/gRPC or OTLP/HTTP, but only traces are
+// wired to an output. Metrics and logs must use the scrape and Docker pipelines.
+otelcol.receiver.otlp "applications" {
   grpc {
     endpoint = "0.0.0.0:4317"
   }
@@ -252,16 +263,22 @@ otelcol.processor.transform "stand_labels" {
   }
 
   output {
-    traces = [otelcol.exporter.otlp.tempo.input]
+    traces = [otelcol.exporter.otlphttp.remote.input]
   }
 }
 
-otelcol.exporter.otlp "tempo" {
+otelcol.auth.bearer "remote" {
+  token = sys.env("REMOTE_TEMPO_TOKEN")
+}
+
+otelcol.exporter.otlphttp "remote" {
   client {
-    endpoint = "tempo:4317"
+    endpoint = sys.env("REMOTE_TEMPO_ENDPOINT")
+    auth     = otelcol.auth.bearer.remote.handler
 
     tls {
-      insecure = true
+      ca_file  = sys.env("REMOTE_CA_FILE")
+      insecure = false
     }
   }
 }

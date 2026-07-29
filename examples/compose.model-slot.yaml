@@ -1,0 +1,26 @@
+# Example override for a custom alternate slot managed as "alt" by model.ps1/model.sh.
+# Load it with COMPOSE_FILE=compose.yaml:examples/compose.model-slot.yaml on POSIX,
+# or COMPOSE_FILE=compose.yaml;examples/compose.model-slot.yaml on Windows.
+#
+# For a second GPU assign an explicit device, for example under deploy.resources:
+#   reservations.devices[0].device_ids: ["1"]
+# Do not publish an extra host port; clients must go through LiteLLM/Caddy.
+services:
+  vllm-alt:
+    profiles: [alt]
+    command:
+      - ${EXAMPLE_SLOT_MODEL_ID:-Qwen/Qwen3-8B-AWQ}
+      - --revision
+      - ${EXAMPLE_SLOT_MODEL_REVISION:?Set an immutable model revision}
+      - --served-model-name
+      - ${EXAMPLE_SLOT_SERVED_MODEL_NAME:-qwen3-8b-awq}
+      - --api-key
+      - ${VLLM_API_KEY}
+      - --max-model-len
+      - ${EXAMPLE_SLOT_MAX_MODEL_LEN:-8192}
+      - --gpu-memory-utilization
+      - ${EXAMPLE_SLOT_GPU_MEMORY_UTILIZATION:-0.85}
+      - --reasoning-parser
+      - ${EXAMPLE_SLOT_REASONING_PARSER:-qwen3}
+    ports:
+      - "127.0.0.1:${EXAMPLE_SLOT_PORT:-8002}:8000"

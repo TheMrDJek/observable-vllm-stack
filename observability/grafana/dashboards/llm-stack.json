@@ -54,7 +54,7 @@
       },
       "targets": [
         {
-          "expr": "max(up{job=~\"vllm-main|vllm-alt\"})",
+          "expr": "max(up{job=~\"vllm-main|vllm-alt\",deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"})",
           "legendFormat": "vLLM",
           "refId": "A"
         }
@@ -96,12 +96,12 @@
       },
       "targets": [
         {
-          "expr": "sum by (model_name) (vllm:num_requests_running)",
+          "expr": "sum by (model_name) (vllm:num_requests_running{deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"})",
           "legendFormat": "{{model_name}} running",
           "refId": "A"
         },
         {
-          "expr": "sum by (model_name) (vllm:num_requests_waiting)",
+          "expr": "sum by (model_name) (vllm:num_requests_waiting{deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"})",
           "legendFormat": "{{model_name}} waiting",
           "refId": "B"
         }
@@ -143,7 +143,7 @@
       },
       "targets": [
         {
-          "expr": "vllm:kv_cache_usage_perc",
+          "expr": "vllm:kv_cache_usage_perc{deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}",
           "legendFormat": "{{model_name}}",
           "refId": "A"
         }
@@ -186,12 +186,12 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(vllm:prompt_tokens_total[5m]))",
+          "expr": "sum(rate(vllm:prompt_tokens_total{deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}[5m]))",
           "legendFormat": "input",
           "refId": "A"
         },
         {
-          "expr": "sum(rate(vllm:generation_tokens_total[5m]))",
+          "expr": "sum(rate(vllm:generation_tokens_total{deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}[5m]))",
           "legendFormat": "output",
           "refId": "B"
         }
@@ -233,12 +233,12 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(vllm:e2e_request_latency_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(vllm:e2e_request_latency_seconds_bucket{deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}[5m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:e2e_request_latency_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:e2e_request_latency_seconds_bucket{deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}[5m])))",
           "legendFormat": "p95",
           "refId": "B"
         }
@@ -282,7 +282,7 @@
       },
       "targets": [
         {
-          "expr": "nvidia_smi_utilization_gpu_ratio",
+          "expr": "nvidia_smi_utilization_gpu_ratio{deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}",
           "legendFormat": "GPU {{uuid}}",
           "refId": "A"
         }
@@ -324,7 +324,7 @@
       },
       "targets": [
         {
-          "expr": "nvidia_smi_memory_used_bytes",
+          "expr": "nvidia_smi_memory_used_bytes{deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}",
           "legendFormat": "GPU {{uuid}}",
           "refId": "A"
         }
@@ -366,7 +366,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (name) (rate(container_cpu_usage_seconds_total{name!=\"\"}[5m]))",
+          "expr": "sum by (name) (rate(container_cpu_usage_seconds_total{name!=\"\",deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}[5m]))",
           "legendFormat": "{{name}}",
           "refId": "A"
         }
@@ -398,7 +398,7 @@
       },
       "targets": [
         {
-          "expr": "{service=~\"vllm-main|vllm-alt|litellm|open-webui\"}",
+          "expr": "{service=~\"vllm-main|vllm-alt|litellm|open-webui\",deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}",
           "refId": "A"
         }
       ],
@@ -414,14 +414,93 @@
     "local"
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up, deployment)",
+        "includeAll": true,
+        "label": "Deployment",
+        "multi": true,
+        "name": "deployment",
+        "options": [],
+        "query": {
+          "query": "label_values(up, deployment)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up{deployment=~\"$deployment\"}, site)",
+        "includeAll": true,
+        "label": "Site",
+        "multi": true,
+        "name": "site",
+        "options": [],
+        "query": {
+          "query": "label_values(up{deployment=~\"$deployment\"}, site)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up{deployment=~\"$deployment\",site=~\"$site\"}, instance)",
+        "includeAll": true,
+        "label": "Instance",
+        "multi": true,
+        "name": "instance",
+        "options": [],
+        "query": {
+          "query": "label_values(up{deployment=~\"$deployment\",site=~\"$site\"}, instance)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
   },
   "time": {
     "from": "now-1h",
     "to": "now"
   },
   "timezone": "browser",
-  "title": "Local LLM stack",
+  "title": "LLM stack",
   "uid": "local-llm-stack",
   "version": 1
 }

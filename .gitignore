@@ -1,3 +1,6 @@
 .env
 data/
+secrets/
 *.log
+.idea/
+examples/.idea/

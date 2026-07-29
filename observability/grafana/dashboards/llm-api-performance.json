@@ -41,7 +41,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(litellm_proxy_total_requests_metric[5m]))",
+          "expr": "sum(rate(litellm_proxy_total_requests_metric{deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}[5m]))",
           "legendFormat": "requests",
           "refId": "A"
         }
@@ -103,7 +103,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(litellm_proxy_failed_requests_metric[5m])) / clamp_min(sum(rate(litellm_proxy_total_requests_metric[5m])), 0.000001)",
+          "expr": "sum(rate(litellm_proxy_failed_requests_metric{deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}[5m])) / clamp_min(sum(rate(litellm_proxy_total_requests_metric{deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}[5m])), 0.000001)",
           "legendFormat": "errors",
           "refId": "A"
         }
@@ -163,7 +163,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket{model_name=~\"$model\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket{model_name=~\"$model\",deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}[5m])))",
           "legendFormat": "p95",
           "refId": "A"
         }
@@ -223,7 +223,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:inter_token_latency_seconds_bucket{model_name=~\"$model\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:inter_token_latency_seconds_bucket{model_name=~\"$model\",deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}[5m])))",
           "legendFormat": "p95",
           "refId": "A"
         }
@@ -266,12 +266,12 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(litellm_proxy_total_requests_metric[5m]))",
+          "expr": "sum(rate(litellm_proxy_total_requests_metric{deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}[5m]))",
           "legendFormat": "all",
           "refId": "A"
         },
         {
-          "expr": "sum(rate(litellm_proxy_failed_requests_metric[5m]))",
+          "expr": "sum(rate(litellm_proxy_failed_requests_metric{deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}[5m]))",
           "legendFormat": "failed",
           "refId": "B"
         }
@@ -313,17 +313,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket{model_name=~\"$model\"}[5m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket{model_name=~\"$model\",deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}[5m])))",
           "legendFormat": "TTFT p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket{model_name=~\"$model\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket{model_name=~\"$model\",deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}[5m])))",
           "legendFormat": "TTFT p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:inter_token_latency_seconds_bucket{model_name=~\"$model\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:inter_token_latency_seconds_bucket{model_name=~\"$model\",deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}[5m])))",
           "legendFormat": "ITL p95",
           "refId": "C"
         }
@@ -365,22 +365,22 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_queue_time_seconds_bucket{model_name=~\"$model\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_queue_time_seconds_bucket{model_name=~\"$model\",deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}[5m])))",
           "legendFormat": "queue",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_prefill_time_seconds_bucket{model_name=~\"$model\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_prefill_time_seconds_bucket{model_name=~\"$model\",deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}[5m])))",
           "legendFormat": "prefill",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_decode_time_seconds_bucket{model_name=~\"$model\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_decode_time_seconds_bucket{model_name=~\"$model\",deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}[5m])))",
           "legendFormat": "decode",
           "refId": "C"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:e2e_request_latency_seconds_bucket{model_name=~\"$model\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:e2e_request_latency_seconds_bucket{model_name=~\"$model\",deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}[5m])))",
           "legendFormat": "end-to-end",
           "refId": "D"
         }
@@ -422,7 +422,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (finished_reason) (rate(vllm:request_success_total{model_name=~\"$model\"}[5m]))",
+          "expr": "sum by (finished_reason) (rate(vllm:request_success_total{model_name=~\"$model\",deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}[5m]))",
           "legendFormat": "{{finished_reason}}",
           "refId": "A"
         }
@@ -465,12 +465,12 @@
       },
       "targets": [
         {
-          "expr": "sum by (model_name) (rate(vllm:prompt_tokens_total{model_name=~\"$model\"}[5m]))",
+          "expr": "sum by (model_name) (rate(vllm:prompt_tokens_total{model_name=~\"$model\",deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}[5m]))",
           "legendFormat": "{{model_name}} input",
           "refId": "A"
         },
         {
-          "expr": "sum by (model_name) (rate(vllm:generation_tokens_total{model_name=~\"$model\"}[5m]))",
+          "expr": "sum by (model_name) (rate(vllm:generation_tokens_total{model_name=~\"$model\",deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}[5m]))",
           "legendFormat": "{{model_name}} output",
           "refId": "B"
         }
@@ -513,12 +513,12 @@
       },
       "targets": [
         {
-          "expr": "sum by (model_name) (vllm:num_requests_running{model_name=~\"$model\"})",
+          "expr": "sum by (model_name) (vllm:num_requests_running{model_name=~\"$model\",deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"})",
           "legendFormat": "{{model_name}} running",
           "refId": "A"
         },
         {
-          "expr": "sum by (model_name) (vllm:num_requests_waiting{model_name=~\"$model\"})",
+          "expr": "sum by (model_name) (vllm:num_requests_waiting{model_name=~\"$model\",deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"})",
           "legendFormat": "{{model_name}} waiting",
           "refId": "B"
         }
@@ -550,7 +550,7 @@
       },
       "targets": [
         {
-          "expr": "{service=~\"litellm|vllm-main|vllm-alt\"} |~ \"(?i)error|exception|traceback\"",
+          "expr": "{service=~\"litellm|vllm-main|vllm-alt\",deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"} |~ \"(?i)error|exception|traceback\"",
           "refId": "A"
         }
       ],
@@ -579,14 +579,92 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values(vllm:num_requests_running, model_name)",
+        "definition": "label_values(up, deployment)",
+        "includeAll": true,
+        "label": "Deployment",
+        "multi": true,
+        "name": "deployment",
+        "options": [],
+        "query": {
+          "query": "label_values(up, deployment)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up{deployment=~\"$deployment\"}, site)",
+        "includeAll": true,
+        "label": "Site",
+        "multi": true,
+        "name": "site",
+        "options": [],
+        "query": {
+          "query": "label_values(up{deployment=~\"$deployment\"}, site)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up{deployment=~\"$deployment\",site=~\"$site\"}, instance)",
+        "includeAll": true,
+        "label": "Instance",
+        "multi": true,
+        "name": "instance",
+        "options": [],
+        "query": {
+          "query": "label_values(up{deployment=~\"$deployment\",site=~\"$site\"}, instance)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(vllm:num_requests_running{deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}, model_name)",
         "includeAll": true,
         "label": "Модель",
         "multi": true,
         "name": "model",
         "options": [],
         "query": {
-          "query": "label_values(vllm:num_requests_running, model_name)",
+          "query": "label_values(vllm:num_requests_running{deployment=~\"$deployment\",site=~\"$site\",instance=~\"$instance\"}, model_name)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 1,

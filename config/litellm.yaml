@@ -29,7 +29,7 @@ router_settings:
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
   database_url: os.environ/DATABASE_URL
-  store_prompts_in_spend_logs: true
+  store_prompts_in_spend_logs: os.environ/STORE_PROMPTS_IN_SPEND_LOGS
   maximum_spend_logs_retention_period: "30d"
   maximum_spend_logs_retention_interval: "1d"
   otel: true

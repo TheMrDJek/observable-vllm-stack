@@ -1,0 +1,30 @@
+(api_route) {
+	@openai path /v1 /v1/*
+	handle @openai {
+		reverse_proxy litellm:4000 {
+			flush_interval -1
+			transport http {
+				dial_timeout 10s
+				response_header_timeout 10m
+				read_timeout 10m
+				write_timeout 10m
+			}
+		}
+	}
+
+	handle {
+		respond "Not Found" 404
+	}
+}
+
+(chat_route) {
+	reverse_proxy open-webui:8080 {
+		flush_interval -1
+		transport http {
+			dial_timeout 10s
+			response_header_timeout 10m
+			read_timeout 10m
+			write_timeout 10m
+		}
+	}
+}

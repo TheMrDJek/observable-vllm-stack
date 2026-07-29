@@ -1,0 +1,19 @@
+{
+	auto_https disable_redirects
+	https_port 8443
+	servers {
+		protocols h1 h2
+	}
+}
+
+import /etc/caddy/routes.caddy
+
+https://{$PUBLIC_API_HOST}:8443 {
+	tls internal
+	import api_route
+}
+
+https://{$PUBLIC_CHAT_HOST}:8443 {
+	tls internal
+	import chat_route
+}
