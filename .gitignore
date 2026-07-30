@@ -8,3 +8,4 @@ secrets/
 *.log
 .idea/
 examples/.idea/
+.claude
