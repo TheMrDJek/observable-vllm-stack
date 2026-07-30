@@ -12,6 +12,14 @@
 - два DNS-имени из `PUBLIC_API_HOST` и `PUBLIC_CHAT_HOST` (`api.vlm.local` и `chat.vlm.local` по умолчанию);
 - свободный TCP/443; этот стек не слушает TCP/80 и не выполняет ACME.
 
+Ресурсы:
+
+| Ресурс | Минимум | Комментарий |
+|---|---|---|
+| Диск | **60 GiB свободно** | измерено: ~28.5 GiB образы (из них 19.7 GiB — сам vLLM), ~4 GiB кэш дефолтной модели; остальное — volumes телеметрии и запас на вторую revision при обновлении |
+| RAM | 16 GiB | ~2 GiB core-сервисы, +2–3 GiB при `local-observability`, остальное под vLLM |
+| VRAM | 12 GiB | для дефолтной `Qwen3.5-4B-AWQ`; расчёт — в [model-operations.md](model-operations.md#расчёт-ресурсов) |
+
 Не устанавливайте CUDA toolkit на хост без реальной необходимости: контейнеру нужны драйвер и NVIDIA Container Toolkit, а не полный CUDA SDK.
 
 ## 2. Подготовка хоста
@@ -31,21 +39,82 @@ sudo reboot
 nvidia-smi
 ```
 
-Установите Docker Engine и Compose plugin по официальной инструкции Docker для Ubuntu. Не используйте устаревший пакет `docker-compose`. Добавьте пользователя в группу `docker` только если принимаете эквивалентный root-доступ этой группы:
+Если `nvidia-smi` не найден, драйвера нет. Установите его и перезагрузитесь:
+
+```bash
+sudo ubuntu-drivers install
+sudo reboot
+```
+
+### Docker Engine и Compose plugin
+
+Команды ниже — официальный способ установки из репозитория Docker для Ubuntu, приведённый здесь целиком, чтобы не уходить из инструкции. Если они перестанут работать, сверьтесь с [docs.docker.com/engine/install/ubuntu](https://docs.docker.com/engine/install/ubuntu/): порядок шагов у Docker иногда меняется.
+
+Не используйте пакет `docker-compose` из репозитория Ubuntu — это устаревшая v1, стек требует v2 (`docker compose`).
+
+```bash
+# 1. убрать конфликтующие пакеты, если они есть
+for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
+  sudo apt-get remove -y "$pkg"
+done
+
+# 2. ключ репозитория
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+# 3. источник пакетов
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# 4. установка
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io \
+  docker-buildx-plugin docker-compose-plugin
+
+# 5. проверка
+sudo docker run --rm hello-world
+docker compose version
+```
+
+Добавьте пользователя в группу `docker` только если принимаете, что членство в ней эквивалентно root на этом хосте:
 
 ```bash
 sudo usermod -aG docker "$USER"
 ```
 
-Перезайдите по SSH, установите NVIDIA Container Toolkit по официальной инструкции NVIDIA и настройте runtime:
+Изменение группы применяется только к новой сессии — **перезайдите по SSH**, иначе `docker` продолжит требовать `sudo`.
+
+### NVIDIA Container Toolkit
+
+Драйвер на хосте сам по себе не даёт контейнеру доступ к GPU. Нужен ещё toolkit. Первоисточник — [docs.nvidia.com/datacenter/cloud-native](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 
 ```bash
+# 1. репозиторий
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+  | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+  | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list > /dev/null
+
+# 2. установка
+sudo apt-get update
+sudo apt-get install -y nvidia-container-toolkit
+
+# 3. прописать runtime в Docker и перезапустить демон
 sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
+
+# 4. контрольная проверка
 docker run --rm --gpus all nvidia/cuda:12.9.0-base-ubuntu22.04 nvidia-smi
 ```
 
-Если последняя команда не работает, vLLM тоже не заработает. Сначала исправьте GPU runtime.
+**Последняя команда — точка невозврата этого раздела.** Если она не отдаёт таблицу GPU, vLLM не запустится. Дальше не идите, разбирайтесь здесь: типовые причины в [troubleshooting.md](troubleshooting.md).
+
+Не устанавливайте полный CUDA toolkit на хост: контейнеру нужны только драйвер и Container Toolkit.
 
 ## 3. Размещение и секреты
 
@@ -62,13 +131,24 @@ chmod 700 secrets secrets/caddy secrets/remote-ca
 # шаблоны описаний: secrets.example/caddy и secrets.example/remote-ca
 ```
 
-Замените каждый `CHANGE_ME` случайным уникальным значением. Не передавайте `.env` в чат, issue, логи или shell history. Требования:
+Замените каждый `CHANGE_ME` случайным уникальным значением. Скрипты откажутся стартовать, пока хотя бы один placeholder остался. Сгенерировать значения:
+
+```bash
+echo "sk-$(openssl rand -hex 24)"   # LITELLM_MASTER_KEY
+echo "sk-$(openssl rand -hex 24)"   # LITELLM_SALT_KEY
+echo "sk-$(openssl rand -hex 24)"   # VLLM_API_KEY
+openssl rand -hex 32                # WEBUI_SECRET_KEY (ровно 64 hex-символа)
+openssl rand -base64 24             # POSTGRES_PASSWORD
+openssl rand -base64 24             # GRAFANA_ADMIN_PASSWORD
+grep -n CHANGE_ME .env              # должно быть пусто перед запуском
+```
+
+Не передавайте `.env` в чат, issue, логи или shell history. Требования:
 
 - `LITELLM_MASTER_KEY` и `LITELLM_SALT_KEY` начинаются с `sk-`;
-- `LITELLM_SALT_KEY` после первого запуска не меняется;
-- `OPEN_WEBUI_LITELLM_KEY` при первом запуске остаётся пустым;
-- `WEBUI_SECRET_KEY` — случайная строка из 64 hex-символов;
-- `POSTGRES_PASSWORD`, `GRAFANA_ADMIN_PASSWORD` и API-ключи не переиспользуются;
+- `LITELLM_SALT_KEY` после первого запуска не меняется — сохраните его отдельно;
+- `OPEN_WEBUI_LITELLM_KEY` при первом запуске остаётся **пустым**; это не placeholder;
+- каждое значение уникально, ключи не переиспользуются между сервисами;
 - `HF_TOKEN` задаётся только для gated-моделей и с минимальными правами.
 
 Для systemd/CI предпочтителен отдельный root-readable env-файл или менеджер секретов. Сам Compose secrets не защищает значение, если источник всё равно лежит открытым файлом.
@@ -112,6 +192,7 @@ Docker управляет iptables напрямую и может обходит
 
 ```bash
 chmod +x ./model.sh
+./model.sh preflight
 ./model.sh observability local
 ./model.sh start main --gpu-metrics
 ./model.sh gateway internal
@@ -119,7 +200,19 @@ chmod +x ./model.sh
 ./model.sh gateway status
 ```
 
-`gateway status` показывает состояние контейнера Caddy через `docker compose ps`; он не выводит активный issuer, имена или срок сертификата. Активный режим определяется последней успешно выполненной командой и смонтированным Caddyfile.
+`preflight` проверяет то, что чаще всего ломает первый запуск: Docker и Compose v2, отсутствие `CHANGE_ME`, GPU из контейнера, свободный диск, занятость публичного порта и разрешение обоих hostnames. Он ничего не чинит автоматически — только сообщает. Расшифровка отказов — в [troubleshooting.md](troubleshooting.md).
+
+`observability local` поднимает не только Prometheus/Loki/Tempo/Grafana, но и PostgreSQL, LiteLLM, Open WebUI и Alloy. Это первый шаг развёртывания, а не опция. Для стенда с удалённым мониторингом вместо неё выполняется `./model.sh observability remote`.
+
+**Первый запуск модели занимает 10–30 минут.** Скачивается около 4 GiB весов в `data/huggingface`, затем модель грузится в VRAM. В это время контейнер находится в состоянии `health: starting` — это нормально, а не отказ. Для vLLM в Compose задан `start_period: 15m` именно поэтому. Следите за прогрессом:
+
+```bash
+docker compose --profile main logs -f vllm-main
+```
+
+Повторные запуски укладываются в 2–5 минут: веса берутся из кэша. Готовность подтверждайте состоянием `healthy` и реальным ответом `/v1/models`, а не состоянием `running`.
+
+`gateway status` показывает состояние контейнера Caddy через `docker compose ps`; он не выводит активный issuer, имена или срок сертификата. Активный режим записывается скриптом в `.env` (`GATEWAY_MODE` и `CADDY_CONFIG_FILE`).
 
 `internal` использует Caddy internal CA. Скопируйте только root certificate:
 
@@ -157,20 +250,25 @@ docker compose up -d --force-recreate open-webui
 
 ## 8. Приёмка
 
+Полный набор команд приёмки с ожидаемыми результатами — в [verification.md](verification.md). Минимальный критерий готовности:
+
 - `https://api.vlm.local/v1/models` отвечает только с корректным bearer token;
 - `https://chat.vlm.local` открывает Open WebUI;
 - сертификат доверен клиентом без `curl -k`;
 - HTTP и все внутренние порты недоступны из клиентской сети;
 - после перезагрузки хоста стек возвращается в ожидаемое состояние;
-- Grafana на `127.0.0.1:3001` показывает данные после генерации тестового трафика;
-- остановка модели не удаляет volumes:
+- Grafana на `127.0.0.1:3001` показывает данные после генерации тестового трафика.
+
+Штатная остановка моделей не удаляет volumes:
 
 ```bash
 ./model.sh stop
 ./model.sh status
 ```
 
-Никогда не используйте `docker compose down -v` в штатной остановке: это удаляет состояние сервисов.
+Никогда не используйте `docker compose down -v` в штатной остановке: это удаляет данные LiteLLM, чаты Open WebUI, телеметрию и приватный ключ internal CA.
+
+Если что-то не работает — [troubleshooting.md](troubleshooting.md).
 
 ## Air-gap
 

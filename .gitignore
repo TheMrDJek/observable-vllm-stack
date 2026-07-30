@@ -1,5 +1,8 @@
 .env
-.crt
+# Одно ".crt" не матчит ничего: gitignore требует глоб. Экспортированный root CA
+# Caddy публичен, но это артефакт конкретного стенда и в репозиторий не попадает.
+*.crt
+caddy-local-root.crt
 data/
 secrets/
 *.log

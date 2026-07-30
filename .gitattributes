@@ -1,0 +1,20 @@
+# Файлы, которые читают Linux-контейнеры или bash, обязаны сохранять LF
+# независимо от настройки core.autocrlf разработчика. model.sh с переводами
+# строк CRLF падает на Ubuntu с ошибкой "command not found" на символе возврата
+# каретки; CRLF в конфигах ломает разбор Caddy и Alloy.
+* text=auto eol=lf
+
+*.sh            text eol=lf
+Caddyfile*      text eol=lf
+*.caddy         text eol=lf
+*.alloy         text eol=lf
+*.yaml          text eol=lf
+*.yml           text eol=lf
+.env.example    text eol=lf
+
+# PowerShell остаётся в CRLF: он выполняется только под Windows.
+*.ps1           text eol=crlf
+
+*.png           binary
+*.svg           text eol=lf
+*.excalidraw    text eol=lf

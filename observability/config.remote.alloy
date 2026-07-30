@@ -3,8 +3,8 @@ logging {
   format = "logfmt"
 }
 
-// Metrics are normalized before remote_write. Fixed stand labels come from the
-// deployment environment; service and model_slot stay bounded to known values.
+// Метрики нормализуются перед remote_write. Постоянные метки стенда берутся из
+// окружения развёртывания; service и model_slot ограничены известными значениями.
 prometheus.relabel "remote" {
   forward_to = [prometheus.remote_write.remote.receiver]
 
@@ -65,8 +65,9 @@ prometheus.scrape "cadvisor" {
   scrape_interval = "15s"
 }
 
-// prometheus.exporter.unix is supported on the target Ubuntu host. Restricting
-// collectors keeps the host baseline predictable and avoids optional services.
+// prometheus.exporter.unix поддерживается на целевом хосте Ubuntu. Ограничение
+// набора коллекторов делает базовый профиль хоста предсказуемым и не тянет
+// необязательные сервисы.
 prometheus.exporter.unix "host" {
   procfs_path = "/rootproc"
   rootfs_path = "/rootfs"
@@ -122,8 +123,8 @@ prometheus.scrape "litellm" {
   scrape_interval = "15s"
 }
 
-// Profile targets are deliberately static. If a model profile is inactive,
-// Alloy keeps running and reports that target as up=0.
+// Цели профилей заданы статически намеренно. Если профиль модели неактивен,
+// Alloy продолжает работать и отдаёт по этой цели up=0.
 prometheus.scrape "vllm_main" {
   job_name = "vllm-main"
   targets = [{
@@ -208,7 +209,25 @@ loki.source.docker "local" {
   targets       = discovery.docker.local.targets
   labels        = {}
   relabel_rules = discovery.relabel.docker_logs.rules
-  forward_to    = [loki.write.remote.receiver]
+  forward_to    = [loki.process.redact.receiver]
+}
+
+// vLLM печатает при старте дамп разрешённых аргументов, а LiteLLM на некоторых
+// путях ошибок может вывести bearer-токен. В режиме remote такие секреты
+// полностью покинули бы хост, поэтому маскирование выполняется до отправки
+// в Loki заказчика.
+loki.process "redact" {
+  forward_to = [loki.write.remote.receiver]
+
+  stage.replace {
+    expression = "(sk-[A-Za-z0-9_\\-]{8,})"
+    replace    = "***REDACTED***"
+  }
+
+  stage.replace {
+    expression = "(?i)(authorization|api[_-]?key|bearer)([\"'’:= ]+)([A-Za-z0-9_\\-\\.]{8,})"
+    replace    = "${1}${2}***REDACTED***"
+  }
 }
 
 loki.write "remote" {
@@ -230,8 +249,8 @@ loki.write "remote" {
   }
 }
 
-// Applications may connect over OTLP/gRPC or OTLP/HTTP, but only traces are
-// wired to an output. Metrics and logs must use the scrape and Docker pipelines.
+// Приложения могут подключаться по OTLP/gRPC или OTLP/HTTP, но к выходу
+// подключены только трейсы. Метрики и логи идут через scrape и конвейер Docker.
 otelcol.receiver.otlp "applications" {
   grpc {
     endpoint = "0.0.0.0:4317"

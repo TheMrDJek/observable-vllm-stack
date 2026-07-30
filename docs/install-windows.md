@@ -9,7 +9,7 @@ Windows 11 — локальный сценарий разработки и пр�
 - Windows NVIDIA Driver с поддержкой CUDA в WSL2;
 - PowerShell 7 или Windows PowerShell 5.1;
 - минимум 8 GiB RAM для базовых сервисов плюс память модели; практически нужен больший запас;
-- минимум 35 GiB на образы и volumes плюс полный размер кэша моделей.
+- **минимум 60 GiB свободно.** Измеренные размеры: образы ~28.5 GiB, из них один только vLLM — 19.7 GiB; кэш дефолтной модели ~4 GiB; остальное на volumes телеметрии и вторую revision модели при обновлении. Разбивка по слоям — в [architecture.md](architecture.md#потребление-ресурсов).
 
 Обновите WSL:
 
@@ -43,6 +43,7 @@ notepad .env
 ## Локальный запуск
 
 ```powershell
+.\model.ps1 preflight
 .\model.ps1 observability local
 .\model.ps1 start main -GpuMetrics
 .\model.ps1 gateway internal
@@ -50,7 +51,11 @@ notepad .env
 docker compose --profile main logs -f vllm-main
 ```
 
-`Ctrl+C` прекращает просмотр логов, но не контейнер. Переключение на `alt` останавливает оба модельных контейнера перед запуском выбранного слота:
+`preflight` проверяет Docker, GPU из контейнера, диск, занятость публичного порта и разрешение hostnames. `observability local` поднимает не только телеметрию, но и PostgreSQL, LiteLLM, Open WebUI и Alloy — это первый шаг развёртывания, а не опция.
+
+**Первый запуск модели занимает 10–30 минут**: качается ~4 GiB весов, затем модель грузится в VRAM. Состояние `health: starting` в это время нормально. `Ctrl+C` прекращает просмотр логов, но не контейнер.
+
+Переключение на `alt` останавливает оба модельных контейнера перед запуском выбранного слота:
 
 ```powershell
 .\model.ps1 start alt -GpuMetrics
@@ -139,4 +144,4 @@ docker compose --profile gateway cp `
 
 ## Локальный air-gap
 
-До отключения сети загрузите Docker images, включая закреплённый digest vLLM, и обе фиксированные revisions моделей; сохраните контрольные суммы. Для HTTPS используйте internal CA и заранее установите его root CA либо предоставьте external-режиму готовые certificate/key files.
+Общий перечень артефактов — в [install-ubuntu-ssh.md → Air-gap](install-ubuntu-ssh.md#air-gap). Специфика Windows: для HTTPS используйте internal CA и заранее установите его root в `Trusted Root Certification Authorities`, либо предоставьте external-режиму готовые certificate/key files.

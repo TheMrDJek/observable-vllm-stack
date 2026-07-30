@@ -6,6 +6,7 @@
 |-------|--------------------------|--------------------|
 | `local` | Alloy + Prometheus + Loki + Tempo + Grafana | локальные volumes |
 | `remote` | только Alloy | удалённый LGTM |
+| `off` | ничего из телеметрии | никуда |
 
 Приложения всегда отправляют OTLP traces на `alloy:4317`. Меняются только sinks Alloy.
 
@@ -121,9 +122,41 @@ model_slot   = main | alt | none
 3. импортируйте оба dashboard;
 4. используйте фильтры `deployment` / `site` / `instance`.
 
+## Режим `off`: развернуть сейчас, подключить мониторинг потом
+
+Штатный сценарий, когда стек ставится на прод, а адреса удалённого LGTM ещё неизвестны или согласуются.
+
+```bash
+./model.sh observability off
+```
+
+Команда останавливает Alloy и локальные Prometheus/Loki/Tempo/Grafana. Обслуживание запросов продолжается: LiteLLM, vLLM, Open WebUI и Caddy не затрагиваются.
+
+Что важно знать:
+
+- **режим переживает `start`/`stop` моделей.** Alloy вынесен в Compose-профиль `telemetry`, поэтому обычный `up -d` его не поднимает. Раньше `start main` возвращал бы остановленный Alloy обратно;
+- **приложения продолжают слать OTLP** на `alloy:4317` и будут писать в свои логи ошибки экспорта. Это ожидаемо и на обслуживание не влияет: экспорт трейсов — best-effort с ретраями;
+- **метрики за этот период не собираются.** История не восстановится задним числом;
+- `ALLOY_CONFIG_FILE` не меняется — при возврате поднимется тот конфиг, что был выбран раньше;
+- volumes локального LGTM сохраняются.
+
+Возврат — обычной командой режима:
+
+```bash
+./model.sh observability local     # или remote, когда endpoints известны
+```
+
+Проверить, что режим действительно держится:
+
+```bash
+./model.sh observability off
+./model.sh start main --gpu-metrics
+docker compose --profile telemetry ps -a alloy    # должен остаться exited
+```
+
 ## Отложенное подключение
 
-1. Стартуйте пилот в `local`.
+1. Стартуйте пилот в `local` — либо в `off`, если телеметрия пока не нужна вовсе.
 2. Позже заполните remote URL/token.
 3. Проверьте DNS/TLS/auth с хоста.
 4. Выполните `observability remote`.
@@ -167,4 +200,4 @@ curl -fsS http://127.0.0.1:12345/-/ready
 
 ## Air-gap
 
-В закрытой сети используйте только `local` либо внутренний LGTM. Образы, dashboards и модели подготовьте заранее. См. раздел air-gap в `docs/install-ubuntu-ssh.md`.
+В закрытой сети используйте только `local` либо внутренний LGTM: `remote` требует исходящих HTTPS-соединений. Образы, dashboards и модели подготовьте заранее — общий перечень в [install-ubuntu-ssh.md → Air-gap](install-ubuntu-ssh.md#air-gap).

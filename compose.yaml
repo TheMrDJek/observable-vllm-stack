@@ -15,6 +15,11 @@ x-vllm-common: &vllm-common
     HF_TOKEN: ${HF_TOKEN:-}
     HF_HUB_DISABLE_TELEMETRY: "1"
     VLLM_MEDIA_URL_ALLOW_REDIRECTS: "0"
+    # Передаётся переменной окружения, а не аргументом --api-key. Аргументы
+    # командной строки попадают в /proc/<pid>/cmdline, который на хосте читает
+    # любой локальный пользователь: он смог бы взять внутренний ключ vLLM и
+    # обойти LiteLLM. /proc/<pid>/environ доступен только владельцу и root.
+    VLLM_API_KEY: ${VLLM_API_KEY}
   networks:
     - backend
   deploy:
@@ -36,53 +41,41 @@ x-vllm-common: &vllm-common
   restart: unless-stopped
 
 services:
+  # Команда задана строкой, а не списком: только в строковой форме Compose
+  # разбивает значение на слова, поэтому пустой *_EXTRA_ARGS не добавляет ни
+  # одного аргумента. В форме списка пустая переменная превратилась бы в пустой
+  # аргумент, а отключить флаг вроде --reasoning-parser было бы нельзя вовсе:
+  # запись ${VAR:-default} подставляет default и при пустом значении тоже.
+  # Поэтому здесь используется ${VAR-default} без двоеточия: дефолт берётся
+  # только когда переменная не определена, а пустое значение означает
+  # "никаких дополнительных флагов".
+  # Флаги, специфичные для семейства модели, держите в *_EXTRA_ARGS.
   vllm-main:
     <<: *vllm-common
     profiles: [main]
-    command:
-      - ${MAIN_MODEL_ID:-QuantTrio/Qwen3.5-4B-AWQ}
-      - --revision
-      - ${MAIN_MODEL_REVISION:-32c292e3a73afe1138518180b1b6d2868c980ee2}
-      - --served-model-name
-      - ${MAIN_SERVED_MODEL_NAME:-qwen3.5-4b-awq}
-      - --api-key
-      - ${VLLM_API_KEY}
-      - --max-model-len
-      - ${MAIN_VLLM_MAX_MODEL_LEN:-8192}
-      - --gpu-memory-utilization
-      - ${MAIN_VLLM_GPU_MEMORY_UTILIZATION:-0.85}
-      - --cpu-offload-gb
-      - ${MAIN_CPU_OFFLOAD_GB:-0}
-      - --enforce-eager
-      - --reasoning-parser
-      - ${MAIN_REASONING_PARSER:-qwen3}
-      - --enable-auto-tool-choice
-      - --tool-call-parser
-      - ${MAIN_TOOL_CALL_PARSER:-qwen3_coder}
-      - --limit-mm-per-prompt.image
-      - ${MAIN_MAX_IMAGES:-2}
-      - --allowed-media-domains
-      - ${VLLM_ALLOWED_MEDIA_DOMAINS:-media.invalid}
+    command: >-
+      ${MAIN_MODEL_ID:-QuantTrio/Qwen3.5-4B-AWQ}
+      --revision ${MAIN_MODEL_REVISION:-32c292e3a73afe1138518180b1b6d2868c980ee2}
+      --served-model-name ${MAIN_SERVED_MODEL_NAME:-qwen3.5-4b-awq}
+      --max-model-len ${MAIN_VLLM_MAX_MODEL_LEN:-8192}
+      --gpu-memory-utilization ${MAIN_VLLM_GPU_MEMORY_UTILIZATION:-0.85}
+      --cpu-offload-gb ${MAIN_CPU_OFFLOAD_GB:-0}
+      --allowed-media-domains ${VLLM_ALLOWED_MEDIA_DOMAINS:-media.invalid}
+      ${MAIN_EXTRA_ARGS---enforce-eager --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder --limit-mm-per-prompt.image 2}
     ports:
       - "127.0.0.1:${MAIN_VLLM_PORT:-8001}:8000"
 
   vllm-alt:
     <<: *vllm-common
     profiles: [alt]
-    command:
-      - ${ALT_MODEL_ID:-Qwen/Qwen3-4B-AWQ}
-      - --revision
-      - ${ALT_MODEL_REVISION:-74d4bd2bd4bff9cafc9345221320bffb08b406a3}
-      - --served-model-name
-      - ${ALT_SERVED_MODEL_NAME:-qwen3-4b-awq}
-      - --api-key
-      - ${VLLM_API_KEY}
-      - --max-model-len
-      - ${ALT_MAX_MODEL_LEN:-16384}
-      - --gpu-memory-utilization
-      - ${ALT_VLLM_GPU_MEMORY_UTILIZATION:-0.85}
-      - --reasoning-parser
-      - ${ALT_REASONING_PARSER:-qwen3}
+    command: >-
+      ${ALT_MODEL_ID:-Qwen/Qwen3-4B-AWQ}
+      --revision ${ALT_MODEL_REVISION:-74d4bd2bd4bff9cafc9345221320bffb08b406a3}
+      --served-model-name ${ALT_SERVED_MODEL_NAME:-qwen3-4b-awq}
+      --max-model-len ${ALT_MAX_MODEL_LEN:-16384}
+      --gpu-memory-utilization ${ALT_VLLM_GPU_MEMORY_UTILIZATION:-0.85}
+      --allowed-media-domains ${VLLM_ALLOWED_MEDIA_DOMAINS:-media.invalid}
+      ${ALT_EXTRA_ARGS---reasoning-parser qwen3}
     ports:
       - "127.0.0.1:${ALT_VLLM_PORT:-8002}:8000"
 
@@ -165,11 +158,13 @@ services:
     networks:
       - backend
       - edge
+    # Зависимости от alloy намеренно нет. Экспорт OTLP выполняется по
+    # принципу best-effort с ретраями, поэтому порядок старта ничего не даёт, а
+    # жёсткая зависимость поднимала бы намеренно остановленный Alloy (режим
+    # 'observability off') при следующем 'up -d'.
     depends_on:
       litellm:
         condition: service_healthy
-      alloy:
-        condition: service_started
     healthcheck:
       test:
         - CMD-SHELL
@@ -217,6 +212,14 @@ services:
       - /tmp
     cap_drop:
       - ALL
+    # У /usr/bin/caddy выставлена file capability cap_net_bind_service. При
+    # no-new-privileges ядро отказывается выполнять execve для бинаря, чьи file
+    # capabilities вне разрешённого набора, поэтому один только cap_drop: ALL
+    # даёт "exec /usr/bin/caddy: operation not permitted". Внутри контейнера
+    # Caddy слушает 8443 и эту capability в работе не использует — она выдана
+    # исключительно ради успешного exec.
+    cap_add:
+      - NET_BIND_SERVICE
     security_opt:
       - no-new-privileges:true
     logging: *default-logging
@@ -267,6 +270,11 @@ services:
 
   alloy:
     image: grafana/alloy:${ALLOY_VERSION:-v1.17.1}
+    # Вынесен в профиль, чтобы режим 'observability off' пережил последующий
+    # 'start main': обычный 'up -d' поднимает все сервисы без профиля и вернул
+    # бы намеренно остановленный Alloy. Команда observability передаёт
+    # --profile telemetry явно.
+    profiles: [telemetry]
     privileged: true
     environment:
       ALLOY_DEPLOY_MODE: docker
@@ -299,6 +307,15 @@ services:
       - "127.0.0.1:${ALLOY_PORT:-12345}:12345"
     networks:
       - backend
+    # В образе Alloy нет ни curl, ни wget, поэтому проверка использует
+    # встроенный в bash /dev/tcp. Она подтверждает, что HTTP-сервер принимает
+    # соединения; полная готовность — GET /-/ready на 127.0.0.1:12345 с хоста.
+    healthcheck:
+      test: [CMD, bash, -c, "exec 3<>/dev/tcp/127.0.0.1/12345"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     logging: *default-logging
     restart: unless-stopped
 

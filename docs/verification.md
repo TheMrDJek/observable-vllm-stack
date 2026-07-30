@@ -2,11 +2,28 @@
 
 Все команды выполняет оператор. Агент/CI не заменяет эту приёмку.
 
-Подставьте свои hostnames, ключи и пути. Для internal CA используйте `--cacert ./caddy-local-root.crt` или системный trust store после установки root.
+Подставьте свои hostnames и пути. Для internal CA используйте `--cacert ./caddy-local-root.crt` или системный trust store после установки root.
+
+## Переменные, используемые ниже
+
+| Переменная | Что это | Откуда взять |
+|---|---|---|
+| `LITELLM_MASTER_KEY` | админский ключ LiteLLM | из `.env`; только с хоста через loopback |
+| `CLIENT_VIRTUAL_KEY` | ограниченный virtual key для проверок API | создаётся в §3 |
+| `OPEN_WEBUI_LITELLM_KEY` | virtual key, который прописан в `.env` для UI | создаётся в §3 |
+
+```bash
+export CLIENT_VIRTUAL_KEY='sk-...'   # не сохраняйте в shell history
+```
+
+Если проверка падает — расшифровка типовых отказов в [troubleshooting.md](troubleshooting.md).
 
 ## 1. Конфигурация без запуска нагрузки
 
 ```bash
+# preflight хоста: Docker, GPU, диск, порт, hostnames
+./model.sh preflight
+
 # Compose с локальной observability и gateway
 docker compose --env-file .env \
   --profile main --profile gateway --profile local-observability \
@@ -17,15 +34,24 @@ OBSERVABILITY_MODE=remote \
 ALLOY_CONFIG_FILE=./observability/config.remote.alloy \
 docker compose --env-file .env --profile main --profile gateway config >/dev/null
 
-# Caddyfile internal
-docker run --rm \
-  -e PUBLIC_API_HOST -e PUBLIC_CHAT_HOST \
-  -v "$PWD/caddy/Caddyfile.internal:/etc/caddy/Caddyfile:ro" \
-  -v "$PWD/caddy/routes.caddy:/etc/caddy/routes.caddy:ro" \
-  caddy:2.10.2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+# все Caddyfile. Файлы монтируются по отдельности, как это делает compose:
+# смонтировать каталог caddy целиком как :ro нельзя, тогда вложенную точку
+# /etc/caddy/certs невозможно создать и docker падает до разбора конфигурации.
+for mode in internal single external migration; do
+  docker run --rm \
+    -e PUBLIC_API_HOST -e PUBLIC_CHAT_HOST \
+    -e OLD_PUBLIC_API_HOST -e OLD_PUBLIC_CHAT_HOST \
+    -e TLS_CERT_FILE -e TLS_KEY_FILE \
+    -v "$PWD/caddy/Caddyfile.$mode:/etc/caddy/Caddyfile:ro" \
+    -v "$PWD/caddy/routes.caddy:/etc/caddy/routes.caddy:ro" \
+    -v "$PWD/secrets/caddy:/etc/caddy/certs:ro" \
+    caddy:2.10.2-alpine caddy validate \
+      --config /etc/caddy/Caddyfile --adapter caddyfile \
+    && echo "OK: $mode"
+done
 ```
 
-Ожидание: exit code `0`.
+Ожидание: exit code `0`. Команды `./model.sh gateway <mode>` выполняют такую же валидацию автоматически и не переключают gateway при ошибке.
 
 ## 2. GPU и базовый стек
 
@@ -46,19 +72,28 @@ docker compose --profile main logs --tail=100 vllm-main
 
 ## 3. Virtual key для Open WebUI
 
-Через SSH tunnel к `127.0.0.1:4000` создайте ограниченный key:
+Админский эндпоинт доступен только на loopback: публичный route в Caddy его не пропускает. Выполняйте команду **на самом хосте**. С рабочей машины предварительно поднимите tunnel: `ssh -L 4000:127.0.0.1:4000 <user>@<server>`.
 
 ```bash
 curl -fsS http://127.0.0.1:4000/key/generate \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"models":["qwen3.5-4b-awq","qwen3-4b-awq"],"max_budget":100}'
+  -d '{"key_alias":"open-webui","models":["qwen3.5-4b-awq","qwen3-4b-awq"],"max_budget":100}'
 ```
 
-Запишите key в `OPEN_WEBUI_LITELLM_KEY`, затем:
+Запишите поле `key` из ответа в `OPEN_WEBUI_LITELLM_KEY`, затем пересоздайте только UI:
 
 ```bash
 docker compose up -d --force-recreate open-webui
+```
+
+Отдельным ключом создайте `CLIENT_VIRTUAL_KEY` для проверок API ниже — не переиспользуйте ключ UI:
+
+```bash
+curl -fsS http://127.0.0.1:4000/key/generate \
+  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"key_alias":"acceptance","models":["qwen3.5-4b-awq","qwen3-4b-awq"]}'
 ```
 
 ## 4. TLS и маршрутизация
@@ -73,7 +108,7 @@ openssl x509 -in ./caddy-local-root.crt -noout -subject -issuer -dates
 
 # API host
 curl -fsS --cacert ./caddy-local-root.crt https://api.vlm.local/v1/models \
-  -H "Authorization: Bearer $OPEN_WEBUI_LITELLM_KEY"
+  -H "Authorization: Bearer $CLIENT_VIRTUAL_KEY"
 
 # неизвестный Host должен получить отказ/пустой сайт, не Open WebUI
 curl -vk --resolve evil.example:443:<server-ip> https://evil.example/ || true

@@ -4,6 +4,7 @@
 
 ## До запуска
 
+- [ ] `./model.sh preflight` пройден без `[FAIL]`.
 - [ ] Ubuntu обновлён, NVIDIA driver и `nvidia-smi` работают.
 - [ ] Docker Engine + Compose plugin + NVIDIA Container Toolkit проверены `docker run --gpus all ... nvidia-smi`.
 - [ ] SSH: отключён password login, запрещён root login, доступ только из admin-сети/VPN.
@@ -54,6 +55,14 @@
 - [ ] Remote endpoints проверяют TLS; credentials write-only.
 - [ ] Labels содержат только `deployment` / `environment` / `site` / `instance` / `service` / `model_slot`.
 - [ ] Тестовый запрос не оставляет Authorization, cookies, prompts или responses в Loki/Tempo.
+- [ ] Проверено, что внутренний ключ vLLM не попал в Loki. vLLM печатает при старте дамп `non-default args`, поэтому ключ, переданный аргументом `--api-key`, попадал в Docker-логи и далее в Loki. Ключ передаётся только переменной `VLLM_API_KEY` — в дамп аргументов она не входит. Дополнительно конвейер `loki.process "redact"` в обоих конфигах Alloy маскирует `sk-*` и пары `authorization/api_key/bearer` как вторая линия защиты. Проверка:
+
+```bash
+# из сети backend; ожидание — ни одной строки с фактическим ключом
+docker run --rm --network ai-vllm-stack_backend curlimages/curl -sS -G \
+  'http://loki:3100/loki/api/v1/query_range' \
+  --data-urlencode 'query={service="vllm-main"} |= "sk-"'
+```
 - [ ] Dashboards импортированы; фильтры стенда работают.
 
 ## Данные и приёмка

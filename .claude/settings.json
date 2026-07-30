@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./model.sh status *)",
+      "Bash(bash -c 'cd \"c:/Users/themr/Документы/GitHub/observable-vllm-stack\"; source /dev/stdin <<< \"$\\(sed -n \"/^list_slots\\(\\)/,/^}/p\" model.sh\\)\"; compose\\(\\){ docker compose \"$@\"; }; list_slots')",
+      "Bash(kill %1)",
+      "Bash(./model.sh start-many *)",
+      "Bash(cp /tmp/compose.backup.yaml compose.yaml)",
+      "Bash(rm -f /tmp/compose.backup.yaml)",
+      "Bash(docker rm *)",
+      "Bash(python -c ' *)",
+      "Bash(git branch *)",
+      "Bash(git stash *)",
+      "Bash(FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f --msg-filter 'sed -e '\\\\''/[Cc]o-[Aa]uthored-[Bb]y:.*cursoragent@cursor\\\\.com/d'\\\\''' -- --all)"
+    ]
+  }
+}

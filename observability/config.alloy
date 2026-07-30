@@ -211,7 +211,25 @@ loki.source.docker "local" {
     site        = sys.env("SITE"),
   }
   relabel_rules = discovery.relabel.docker_logs.rules
-  forward_to    = [loki.write.local.receiver]
+  forward_to    = [loki.process.redact.receiver]
+}
+
+// vLLM печатает при старте дамп разрешённых аргументов, а LiteLLM на некоторых
+// путях ошибок может вывести bearer-токен. Без этой стадии такие секреты
+// сохраняются в Loki дословно, а в режиме remote покидают хост.
+// Маскирование выполняется до любой записи.
+loki.process "redact" {
+  forward_to = [loki.write.local.receiver]
+
+  stage.replace {
+    expression = "(sk-[A-Za-z0-9_\\-]{8,})"
+    replace    = "***REDACTED***"
+  }
+
+  stage.replace {
+    expression = "(?i)(authorization|api[_-]?key|bearer)([\"'’:= ]+)([A-Za-z0-9_\\-\\.]{8,})"
+    replace    = "${1}${2}***REDACTED***"
+  }
 }
 
 loki.write "local" {
@@ -220,7 +238,7 @@ loki.write "local" {
   }
 }
 
-// Apps send OTLP traces only. Metrics come from Prometheus scrapes; logs from Docker.
+// Приложения шлют только OTLP-трейсы. Метрики — через scrape Prometheus, логи — из Docker.
 otelcol.receiver.otlp "local" {
   grpc {
     endpoint = "0.0.0.0:4317"
