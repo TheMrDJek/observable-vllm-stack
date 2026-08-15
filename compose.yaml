@@ -7,7 +7,7 @@ x-logging: &default-logging
     max-file: ${DOCKER_LOG_MAX_FILES:-3}
 
 x-vllm-common: &vllm-common
-  image: ${VLLM_IMAGE:-vllm/vllm-openai@sha256:24f2f8975d011ea7f7066a547886a08a1fd3c4bf0880463487fae4f01ce723c6}
+  image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.27.1}
   ipc: host
   volumes:
     - ./data/huggingface:/root/.cache/huggingface
@@ -65,6 +65,10 @@ services:
     ports:
       - "127.0.0.1:${MAIN_VLLM_PORT:-8001}:8000"
 
+  # Слот определён, но не запущен: профиль без активации не создаёт контейнер и
+  # не занимает VRAM. Поэтому второй слот ничего не стоит, пока не понадобится,
+  # а все значения берутся из инлайновых дефолтов — блок ALT_* в .env
+  # заводить не обязательно. Запуск: 'model.sh start alt' (остановит main).
   vllm-alt:
     <<: *vllm-common
     profiles: [alt]
@@ -98,7 +102,7 @@ services:
     restart: unless-stopped
 
   litellm:
-    image: ghcr.io/berriai/litellm:${LITELLM_VERSION:-v1.90.5}
+    image: ghcr.io/berriai/litellm:${LITELLM_VERSION:-v1.96.2}
     command: [--config, /app/config.yaml, --port, "4000", --num_workers, "1"]
     environment:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
@@ -134,7 +138,7 @@ services:
     restart: unless-stopped
 
   open-webui:
-    image: ghcr.io/open-webui/open-webui:${OPEN_WEBUI_VERSION:-v0.10.2}
+    image: ghcr.io/open-webui/open-webui:${OPEN_WEBUI_VERSION:-v0.11.0}
     environment:
       OPENAI_API_BASE_URLS: http://litellm:4000/v1
       OPENAI_API_KEYS: ${OPEN_WEBUI_LITELLM_KEY:-}
@@ -176,9 +180,15 @@ services:
     logging: *default-logging
     restart: unless-stopped
 
-  caddy:
-    image: caddy:${CADDY_VERSION:-2.10.2-alpine}
+  # Образ nginx-unprivileged, а не обычный nginx: там master стартует под root и
+  # для перехода воркеров в пользователя nginx требует CAP_SETUID и CAP_SETGID,
+  # то есть cap_drop: ALL пришлось бы ослабить. Здесь весь процесс работает под
+  # UID 101 сразу, и capabilities не нужны вовсе. Плата — ключ TLS обязан быть
+  # читаемым для UID 101; это проверяет 'model.sh gateway' перед перезапуском.
+  nginx:
+    image: nginxinc/nginx-unprivileged:${NGINX_VERSION:-1.29-alpine}
     profiles: [gateway]
+    user: "101:101"
     environment:
       PUBLIC_API_HOST: ${PUBLIC_API_HOST}
       PUBLIC_CHAT_HOST: ${PUBLIC_CHAT_HOST}
@@ -186,12 +196,22 @@ services:
       OLD_PUBLIC_CHAT_HOST: ${OLD_PUBLIC_CHAT_HOST:-}
       TLS_CERT_FILE: ${TLS_CERT_FILE:-server.crt}
       TLS_KEY_FILE: ${TLS_KEY_FILE:-server.key}
+      TLS_INTERNAL_CERT_FILE: ${TLS_INTERNAL_CERT_FILE:-internal.crt}
+      TLS_INTERNAL_KEY_FILE: ${TLS_INTERNAL_KEY_FILE:-internal.key}
+      NGINX_CLIENT_MAX_BODY_SIZE: ${NGINX_CLIENT_MAX_BODY_SIZE:-0}
+      # Ограничивает envsubst перечисленными префиксами. Без фильтра entrypoint
+      # подставил бы и переменные самого nginx — $host, $scheme,
+      # $proxy_add_x_forwarded_for — пустыми строками, и шлюз потерял бы
+      # заголовки проксирования, пройдя при этом nginx -t.
+      NGINX_ENVSUBST_FILTER: '^(PUBLIC_|OLD_PUBLIC_|TLS_|NGINX_CLIENT_)'
     volumes:
-      - ${CADDY_CONFIG_FILE:-./caddy/Caddyfile.internal}:/etc/caddy/Caddyfile:ro
-      - ./caddy/routes.caddy:/etc/caddy/routes.caddy:ro
-      - ${TLS_CERTS_DIR:-./secrets/caddy}:/etc/caddy/certs:ro
-      - caddy-data:/data
-      - caddy-config:/config
+      - ./nginx/templates/common.conf.template:/etc/nginx/templates/00-common.conf.template:ro
+      - ${NGINX_CONFIG_FILE:-./nginx/templates/gateway.internal.conf.template}:/etc/nginx/templates/10-gateway.conf.template:ro
+      # Каталог маршрутов монтируется вне /etc/nginx/conf.d: всё, что лежит там,
+      # включается в http-блок автоматически, а эти файлы содержат директивы
+      # уровня location и на верхнем уровне дали бы ошибку разбора.
+      - ./nginx/routes:/etc/nginx/routes:ro
+      - ${TLS_CERTS_DIR:-./secrets/tls}:/etc/nginx/certs:ro
     ports:
       - "${PUBLIC_BIND_ADDRESS:-0.0.0.0}:${PUBLIC_HTTPS_PORT:-443}:8443"
     networks:
@@ -202,24 +222,24 @@ services:
       open-webui:
         condition: service_healthy
     healthcheck:
-      test: [CMD-SHELL, "wget -q -O /dev/null http://127.0.0.1:2019/config/"]
+      test: [CMD-SHELL, "wget -q -O /dev/null http://127.0.0.1:8081/healthz"]
       interval: 15s
       timeout: 5s
       retries: 10
       start_period: 15s
     read_only: true
+    # mode=1777, а не uid=101: опции uid/gid для tmpfs игнорируются частью
+    # конфигураций Docker, и каталог достался бы root, после чего nginx под
+    # UID 101 не смог бы ни отрендерить шаблоны, ни создать временные пути.
     tmpfs:
-      - /tmp
+      # Здесь лежит nginx.pid: unprivileged-образ переносит его из /var/run.
+      - /tmp:mode=1777
+      - /var/cache/nginx:mode=1777
+      # Сюда entrypoint рендерит шаблоны. Монтирование поверх заодно скрывает
+      # штатный default.conf из образа, который слушал бы 8080.
+      - /etc/nginx/conf.d:mode=1777
     cap_drop:
       - ALL
-    # У /usr/bin/caddy выставлена file capability cap_net_bind_service. При
-    # no-new-privileges ядро отказывается выполнять execve для бинаря, чьи file
-    # capabilities вне разрешённого набора, поэтому один только cap_drop: ALL
-    # даёт "exec /usr/bin/caddy: operation not permitted". Внутри контейнера
-    # Caddy слушает 8443 и эту capability в работе не использует — она выдана
-    # исключительно ради успешного exec.
-    cap_add:
-      - NET_BIND_SERVICE
     security_opt:
       - no-new-privileges:true
     logging: *default-logging
@@ -372,5 +392,3 @@ volumes:
   tempo-data:
   alloy-data:
   grafana-data:
-  caddy-data:
-  caddy-config:

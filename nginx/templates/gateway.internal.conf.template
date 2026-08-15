@@ -1,0 +1,25 @@
+# Режим 'internal': оба имени обслуживаются сертификатом локального CA,
+# который создаёт 'model.sh gateway internal' в ${TLS_CERTS_DIR}.
+# Корневой сертификат для клиентов — ${TLS_CERTS_DIR}/internal-ca.crt.
+
+server {
+	listen 8443 ssl;
+	http2 on;
+	server_name ${PUBLIC_API_HOST};
+
+	ssl_certificate     /etc/nginx/certs/${TLS_INTERNAL_CERT_FILE};
+	ssl_certificate_key /etc/nginx/certs/${TLS_INTERNAL_KEY_FILE};
+
+	include /etc/nginx/routes/api.conf;
+}
+
+server {
+	listen 8443 ssl;
+	http2 on;
+	server_name ${PUBLIC_CHAT_HOST};
+
+	ssl_certificate     /etc/nginx/certs/${TLS_INTERNAL_CERT_FILE};
+	ssl_certificate_key /etc/nginx/certs/${TLS_INTERNAL_KEY_FILE};
+
+	include /etc/nginx/routes/chat.conf;
+}

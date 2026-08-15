@@ -1,12 +1,12 @@
 # Файлы, которые читают Linux-контейнеры или bash, обязаны сохранять LF
 # независимо от настройки core.autocrlf разработчика. model.sh с переводами
 # строк CRLF падает на Ubuntu с ошибкой "command not found" на символе возврата
-# каретки; CRLF в конфигах ломает разбор Caddy и Alloy.
+# каретки; CRLF в конфигах ломает разбор nginx и Alloy.
 * text=auto eol=lf
 
 *.sh            text eol=lf
-Caddyfile*      text eol=lf
-*.caddy         text eol=lf
+*.conf          text eol=lf
+*.template      text eol=lf
 *.alloy         text eol=lf
 *.yaml          text eol=lf
 *.yml           text eol=lf

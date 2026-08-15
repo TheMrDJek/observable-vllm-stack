@@ -6,6 +6,9 @@ model_list:
       api_key: os.environ/VLLM_API_KEY
       timeout: 600
 
+  # Слот alt по умолчанию остановлен. Запись остаётся здесь намеренно: LiteLLM
+  # публикует все зарегистрированные модели, и запрос к неактивной вернёт явную
+  # ошибку соединения вместо молчаливого перехода на другую модель.
   - model_name: qwen3-4b-awq
     litellm_params:
       model: openai/qwen3-4b-awq

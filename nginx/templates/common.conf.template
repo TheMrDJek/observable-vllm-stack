@@ -1,0 +1,60 @@
+# Общая часть конфигурации шлюза, одинаковая для всех режимов gateway.
+#
+# Файл лежит в /etc/nginx/templates и рендерится штатным entrypoint образа
+# nginx в /etc/nginx/conf.d/00-common.conf. Подставляются только переменные,
+# чьи имена матчит NGINX_ENVSUBST_FILTER из compose.yaml; переменные самого
+# nginx ($host, $scheme, $connection_upgrade) остаются нетронутыми. Без этого
+# фильтра envsubst затёр бы их пустыми строками.
+#
+# Префикс 00- гарантирует, что map и resolver попадут в конфигурацию раньше
+# server-блоков режима из 10-gateway.conf.
+
+# Встроенный DNS Docker в user-defined сети. Нужен для проксирования по имени
+# через переменную — см. комментарий в routes/to_litellm.conf.
+resolver 127.0.0.11 valid=10s ipv6=off;
+resolver_timeout 5s;
+
+# Проброс websocket-соединений Open WebUI. Значение 'close' на пустом Upgrade
+# не даёт отправить в upstream висячий заголовок Connection: upgrade.
+map $http_upgrade $connection_upgrade {
+	default upgrade;
+	''      close;
+}
+
+# 0 = без ограничения, как было у Caddy. Значение вроде 64m ограничивает
+# размер запроса к /v1 и загрузок в Open WebUI; менять осознанно, слишком
+# низкий предел ломает мультимодальные запросы с картинками.
+client_max_body_size ${NGINX_CLIENT_MAX_BODY_SIZE};
+
+server_tokens off;
+
+ssl_protocols TLSv1.2 TLSv1.3;
+ssl_prefer_server_ciphers off;
+ssl_session_cache shared:GATEWAY:10m;
+ssl_session_timeout 1d;
+ssl_session_tickets off;
+
+# Соединения с неизвестным SNI обрываются на этапе handshake. Без этого блока
+# default_server-ом стал бы первый по порядку server, и любой чужой хост,
+# указывающий на этот IP, получал бы наш сертификат и доступ к маршрутам.
+server {
+	listen 8443 ssl default_server;
+	http2 on;
+	ssl_reject_handshake on;
+}
+
+# Отдельный plaintext-порт на loopback для docker healthcheck: у образа нет
+# curl, а busybox wget не умеет проверять self-signed TLS без лишних флагов.
+# Наружу порт не публикуется.
+server {
+	listen 127.0.0.1:8081;
+	access_log off;
+
+	location = /healthz {
+		return 200 "ok\n";
+	}
+
+	location / {
+		return 404;
+	}
+}
