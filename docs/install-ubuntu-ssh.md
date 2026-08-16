@@ -137,6 +137,7 @@ chmod 700 secrets secrets/tls secrets/remote-ca
 echo "sk-$(openssl rand -hex 24)"   # LITELLM_MASTER_KEY
 echo "sk-$(openssl rand -hex 24)"   # LITELLM_SALT_KEY
 echo "sk-$(openssl rand -hex 24)"   # VLLM_API_KEY
+openssl rand -base64 24             # LITELLM_UI_PASSWORD
 openssl rand -base64 24             # POSTGRES_PASSWORD
 openssl rand -base64 24             # GRAFANA_ADMIN_PASSWORD
 grep -n CHANGE_ME .env              # должно быть пусто перед запуском
@@ -193,8 +194,8 @@ Docker управляет iptables напрямую и может обходит
 chmod +x ./model.sh
 ./model.sh preflight
 ./model.sh observability local
-./model.sh start main --gpu-metrics
 ./model.sh gateway internal
+./model.sh start main --gpu-metrics
 ./model.sh status
 ./model.sh gateway status
 ```

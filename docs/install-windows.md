@@ -45,8 +45,8 @@ notepad .env
 ```powershell
 .\model.ps1 preflight
 .\model.ps1 observability local
-.\model.ps1 start main -GpuMetrics
 .\model.ps1 gateway internal
+.\model.ps1 start main -GpuMetrics
 .\model.ps1 status
 docker compose --profile main logs -f vllm-main
 ```

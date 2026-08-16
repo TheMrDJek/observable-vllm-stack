@@ -50,8 +50,8 @@ chmod 600 .env
 # замените все CHANGE_ME, включая LITELLM_UI_PASSWORD
 ./model.sh preflight
 ./model.sh observability local
-./model.sh start main --gpu-metrics
 ./model.sh gateway internal
+./model.sh start main --gpu-metrics
 ./model.sh status
 ```
 
@@ -62,12 +62,14 @@ Copy-Item .env.example .env
 # замените все CHANGE_ME, включая LITELLM_UI_PASSWORD
 .\model.ps1 preflight
 .\model.ps1 observability local
-.\model.ps1 start main -GpuMetrics
 .\model.ps1 gateway internal
+.\model.ps1 start main -GpuMetrics
 .\model.ps1 status
 ```
 
 > **`observability local` — это первый шаг развёртывания, а не опция.** Помимо Prometheus/Loki/Tempo/Grafana команда поднимает PostgreSQL, LiteLLM и Alloy. Пропустить её нельзя: в режиме `remote` вместо неё выполняется `observability remote`.
+
+Шлюз поднимается раньше модели намеренно: он проверяется за минуты, а загрузка образа vLLM и весов занимает десятки. Если TLS или маршрутизация сломаны, вы узнаете об этом сразу, а не после 20 GB загрузки.
 
 **Первый запуск модели занимает 10–30 минут**: качается ~4 GiB весов, затем модель грузится в VRAM. Состояние `health: starting` в это время нормально. Следите за прогрессом:
 

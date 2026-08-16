@@ -69,8 +69,8 @@ done
 ```bash
 docker run --rm --gpus all nvidia/cuda:12.9.0-base-ubuntu22.04 nvidia-smi
 ./model.sh observability local
-./model.sh start main --gpu-metrics
 ./model.sh gateway internal
+./model.sh start main --gpu-metrics
 ./model.sh status
 docker compose --profile main logs --tail=100 vllm-main
 ```
@@ -203,7 +203,7 @@ curl -fsS http://127.0.0.1:12345/-/ready
 Из пользовательской сети:
 
 ```bash
-nmap -Pn -p 22,80,443,3000,3001,4000,8001,8002,9090,12345 <server-ip>
+nmap -Pn -p 22,80,443,3001,4000,8001,8002,9090,12345 <server-ip>
 ```
 
 Ожидание: открыт только `443`. Из admin-сети дополнительно допустим `22`.
