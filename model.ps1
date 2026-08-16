@@ -135,7 +135,11 @@ function Assert-Targets {
             throw "Unknown model slot '$value'. Available slots: $known."
         }
     }
-    if (($Values | Select-Object -Unique).Count -ne $Values.Count) {
+    # Обёртка @() обязательна: конвейер из одного элемента возвращает скаляр, а
+    # не массив, и обращение к .Count на строке под Set-StrictMode -Version
+    # Latest завершается PropertyNotFoundStrict. Это ломало любой 'start <слот>'
+    # с одним аргументом, то есть основной сценарий.
+    if (@($Values | Select-Object -Unique).Count -ne @($Values).Count) {
         throw "Model slots must not be repeated."
     }
 }
