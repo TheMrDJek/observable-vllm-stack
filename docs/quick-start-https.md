@@ -34,25 +34,26 @@ Windows:
 .\model.ps1 gateway status
 ```
 
-Первая команда монтирует `caddy/Caddyfile.internal` и запускает профиль `gateway`. `gateway status` выполняет только `docker compose --profile gateway ps caddy`: он показывает состояние контейнера, но не issuer, SAN, expiry или сохранённый режим.
+Первая команда делает три вещи по порядку: выпускает сертификат локального CA в `TLS_CERTS_DIR`, прогоняет `nginx -t` в одноразовом контейнере и запускает профиль `gateway` с шаблоном `nginx/templates/gateway.internal.conf.template`.
+
+`gateway status` выполняет только `docker compose --profile gateway ps nginx`: он показывает состояние контейнера, но не issuer, SAN, expiry или сохранённый режим.
+
+Ключ CA переиспользуется между запусками, поэтому повторный `gateway internal` не обесценивает trust store клиентов — в выводе будет `Reusing the existing internal CA`. Leaf перевыпускается автоматически при смене имён в `.env` или за 30 дней до истечения.
 
 ## 3. Установка root CA клиентам
 
-Скопируйте root certificate из volume Caddy:
+Корневой сертификат лежит прямо в `TLS_CERTS_DIR` — копировать из контейнера ничего не нужно:
 
 ```bash
-docker compose --profile gateway cp \
-  caddy:/data/caddy/pki/authorities/local/root.crt \
-  ./caddy-local-root.crt
-openssl x509 -in ./caddy-local-root.crt -noout -fingerprint -sha256
+openssl x509 -in secrets/tls/internal-ca.crt -noout -fingerprint -sha256 -subject -dates
 ```
 
-Передайте сертификат клиентам по аутентифицированному каналу и сверьте fingerprint вне канала передачи. Закрытый ключ CA никогда не копируйте.
+Передайте `internal-ca.crt` клиентам по аутентифицированному каналу и сверьте fingerprint вне канала передачи. Файл `internal-ca.key` — закрытый ключ CA, он не покидает хост.
 
 Ubuntu/Debian-клиент:
 
 ```bash
-sudo install -m 0644 caddy-local-root.crt /usr/local/share/ca-certificates/caddy-local-root.crt
+sudo install -m 0644 internal-ca.crt /usr/local/share/ca-certificates/vlm-internal-ca.crt
 sudo update-ca-certificates
 ```
 
@@ -60,7 +61,7 @@ Windows 11, PowerShell от администратора:
 
 ```powershell
 Import-Certificate `
-  -FilePath .\caddy-local-root.crt `
+  -FilePath .\secrets\tls\internal-ca.crt `
   -CertStoreLocation Cert:\LocalMachine\Root
 ```
 
@@ -83,6 +84,8 @@ $headers = @{ Authorization = "Bearer $env:LITELLM_MASTER_KEY" }
 Invoke-RestMethod -Uri "https://api.vlm.local/v1/models" -Headers $headers
 ```
 
+> **На Windows сначала поставьте root CA в хранилище (шаг 3).** И `curl.exe`, и curl из Git Bash используют Schannel, который берёт доверие только из системного хранилища Windows и **игнорирует `--cacert`**. Попытка проверить с флагом `--cacert`, не установив корень, завершается не понятной ошибкой сертификата, а обрывом рукопожатия: `schannel: failed to receive handshake` и `HTTP 000`.
+
 Откройте `https://chat.vlm.local` в браузере. Проверка считается успешной, только если:
 
 - нет предупреждения сертификата;
@@ -96,6 +99,6 @@ Invoke-RestMethod -Uri "https://api.vlm.local/v1/models" -Headers $headers
 
 Internal CA — режим пилота. Переход на сертификат заказчика и, при необходимости, одновременная смена DNS-имён описаны одним пошаговым руководством в [network-and-tls.md → Переход на внешний сертификат](network-and-tls.md#переход-на-внешний-сертификат). Там же — правила окна миграции, `curl --resolve` для проверки нового IP и порядок rollback.
 
-Коротко: режимы `migration` и `external` не выпускают и не обновляют сертификат — Caddy читает готовые файлы из `TLS_CERTS_DIR`. Скрипт перед запуском проверяет наличие обоих файлов и валидирует Caddyfile, но не проверяет SAN, срок действия и соответствие ключа сертификату — это делает оператор.
+Коротко: режимы `migration` и `external` не выпускают и не обновляют сертификат — nginx читает готовые файлы из `TLS_CERTS_DIR`. Скрипт перед запуском проверяет наличие обоих файлов, читаемость ключа под UID 101 и прогоняет `nginx -t`, но не проверяет SAN, срок действия и соответствие ключа сертификату — это делает оператор.
 
 Root CA internal можно удалить с клиентов только после подтверждения внешней цепочки и окончания rollback-окна.

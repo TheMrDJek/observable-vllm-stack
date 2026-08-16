@@ -22,14 +22,14 @@
 - [ ] `22/tcp` открыт только admin-сети.
 - [ ] LiteLLM, Open WebUI, Grafana, Prometheus, Alloy, PostgreSQL и vLLM не опубликованы наружу.
 - [ ] UFW/firewall и `DOCKER-USER` проверены: Docker published ports не обходят политику.
-- [ ] Неизвестный Host/SNI на Caddy не обслуживает API/UI.
+- [ ] Неизвестный Host/SNI на nginx не обслуживает API/UI.
 
 ## TLS
 
 - [ ] Клиенты проверяют цепочку без `-k` / `verify=false`.
 - [ ] SAN сертификата содержит `PUBLIC_API_HOST` и `PUBLIC_CHAT_HOST`.
 - [ ] Для internal CA клиентам выдан только root certificate; private key CA не копировался.
-- [ ] Для external/migration cert/key лежат в `secrets/caddy` с минимальными правами.
+- [ ] Для external/migration cert/key лежат в `secrets/tls` с минимальными правами.
 - [ ] HSTS включается только после окончательного перехода на сертификат заказчика.
 
 ## Идентификация и приложения
@@ -44,8 +44,8 @@
 
 ## Контейнеры и supply chain
 
-- [ ] Наружу опубликован только Caddy.
-- [ ] Сети `edge` и `backend` разделены: Caddy не видит PostgreSQL/Alloy/Docker socket.
+- [ ] Наружу опубликован только nginx.
+- [ ] Сети `edge` и `backend` разделены: nginx не видит PostgreSQL/Alloy/Docker socket.
 - [ ] Образы закреплены digest/тегом из `.env.example`, модели — revision.
 - [ ] Alloy privileged принят осознанно; входящий доступ к Alloy отсутствует.
 - [ ] `HF_TOKEN` имеет минимальный scope или пуст.
@@ -67,7 +67,7 @@ docker run --rm --network ai-vllm-stack_backend curlimages/curl -sS -G \
 
 ## Данные и приёмка
 
-- [ ] Backup `.env`, PostgreSQL, Open WebUI и Caddy CA защищён так же, как прод-секреты.
+- [ ] Backup `.env`, PostgreSQL, Open WebUI и nginx CA защищён так же, как прод-секреты.
 - [ ] Если данные объявлены сохраняемыми — выполнен хотя бы один restore test.
 - [ ] Запрос без key / с отозванным key получает 401/403.
 - [ ] Превышение RPM/TPM блокируется.

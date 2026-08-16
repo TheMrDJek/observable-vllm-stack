@@ -126,9 +126,9 @@ git clone <repository-url> /opt/ai-vllm-stack
 cd /opt/ai-vllm-stack
 cp .env.example .env
 chmod 0600 .env
-mkdir -p secrets/caddy secrets/remote-ca
-chmod 700 secrets secrets/caddy secrets/remote-ca
-# шаблоны описаний: secrets.example/caddy и secrets.example/remote-ca
+mkdir -p secrets/tls secrets/remote-ca
+chmod 700 secrets secrets/tls secrets/remote-ca
+# шаблоны описаний: secrets.example/tls и secrets.example/remote-ca
 ```
 
 Замените каждый `CHANGE_ME` случайным уникальным значением. Скрипты откажутся стартовать, пока хотя бы один placeholder остался. Сгенерировать значения:
@@ -212,23 +212,21 @@ docker compose --profile main logs -f vllm-main
 
 Повторные запуски укладываются в 2–5 минут: веса берутся из кэша. Готовность подтверждайте состоянием `healthy` и реальным ответом `/v1/models`, а не состоянием `running`.
 
-`gateway status` показывает состояние контейнера Caddy через `docker compose ps`; он не выводит активный issuer, имена или срок сертификата. Активный режим записывается скриптом в `.env` (`GATEWAY_MODE` и `CADDY_CONFIG_FILE`).
+`gateway status` показывает состояние контейнера nginx через `docker compose ps`; он не выводит активный issuer, имена или срок сертификата. Активный режим записывается скриптом в `.env` (`GATEWAY_MODE` и `NGINX_CONFIG_FILE`).
 
-`internal` использует Caddy internal CA. Скопируйте только root certificate:
+`internal` использует локальный CA: команда сама выпускает сертификат в `TLS_CERTS_DIR` при первом запуске и переиспользует ключ CA при последующих. Клиентам нужен только корневой сертификат:
 
 ```bash
-docker compose --profile gateway cp \
-  caddy:/data/caddy/pki/authorities/local/root.crt \
-  ./caddy-local-root.crt
+openssl x509 -in secrets/tls/internal-ca.crt -noout -subject -dates -fingerprint -sha256
 ```
 
-Установите его клиентам по инструкции [Быстрый старт HTTPS](quick-start-https.md), затем проверяйте без `-k`.
+Передайте `secrets/tls/internal-ca.crt` по аутентифицированному каналу и установите клиентам по инструкции [Быстрый старт HTTPS](quick-start-https.md), затем проверяйте без `-k`. Файл `internal-ca.key` — закрытый ключ CA, он остаётся на этом хосте.
 
 Запуск модели происходит в фоне. Готовность подтверждайте health/status и логами конкретного vLLM-сервиса, а не только состоянием `running`.
 
 ## 7. Ключ Open WebUI
 
-Публичный Caddy route API пропускает только `/v1` и не открывает административный `/key/generate`. Создайте virtual key через loopback LiteLLM после его запуска:
+Публичный nginx route API пропускает только `/v1` и не открывает административный `/key/generate`. Создайте virtual key через loopback LiteLLM после его запуска:
 
 ```bash
 read -rsp "LiteLLM master key: " LITELLM_MASTER_KEY; echo
@@ -281,4 +279,4 @@ docker compose up -d --force-recreate open-webui
 - локальный registry и/или архивы `docker save`;
 - контрольные суммы и SBOM/реестр источников.
 
-Загрузите модель в кэш заранее и исключите сетевые обращения Hugging Face. `HF_TOKEN` в air-gap не заменяет локальные артефакты. Репозиторий фиксирует vLLM image по digest и обе модели по revisions; сохраняйте именно эти артефакты. Внешний ACME без сети не работает; текущий external-режим Caddy в любом случае использует заранее предоставленные файлы сертификата и ключа.
+Загрузите модель в кэш заранее и исключите сетевые обращения Hugging Face. `HF_TOKEN` в air-gap не заменяет локальные артефакты. Репозиторий фиксирует vLLM image по digest и обе модели по revisions; сохраняйте именно эти артефакты. Внешний ACME без сети не работает; текущий external-режим nginx в любом случае использует заранее предоставленные файлы сертификата и ключа.

@@ -4,9 +4,9 @@ OpenAI-совместимый стек для локальных vLLM-модел
 
 ```mermaid
 flowchart LR
-  client[Клиент] -->|"HTTPS 443"| caddy[Caddy]
-  caddy -->|"api hostname"| litellm[LiteLLM]
-  caddy -->|"chat hostname"| webui[Open WebUI]
+  client[Клиент] -->|"HTTPS 443"| nginx[nginx]
+  nginx -->|"api hostname"| litellm[LiteLLM]
+  nginx -->|"chat hostname"| webui[Open WebUI]
   webui --> litellm
   litellm --> vllm[Активный vLLM]
   litellm --> pg[(PostgreSQL)]
@@ -19,7 +19,7 @@ flowchart LR
 | vLLM | inference-движок, OpenAI-совместимый API | да |
 | LiteLLM | virtual keys, лимиты, учёт, стабильное имя модели | да |
 | PostgreSQL | хранилище ключей и usage LiteLLM | да |
-| Caddy | единственный внешний HTTPS-вход на 443, срез админских путей | да для пилота |
+| nginx | единственный внешний HTTPS-вход на 443, срез админских путей | да для пилота |
 | Open WebUI | чат-интерфейс | нет |
 | Alloy + LGTM | метрики, логи, трейсы локально или в удалённый мониторинг | нет |
 | NVIDIA GPU Exporter | GPU-метрики | нет |
@@ -79,7 +79,7 @@ docker compose --profile main logs -f vllm-main
 
 После старта LiteLLM создайте ограниченный virtual key для Open WebUI, запишите в `OPEN_WEBUI_LITELLM_KEY` и пересоздайте только `open-webui`. Master key в WebUI не передавайте. Подробности — в инструкциях установки и [ИБ-чеклисте](docs/security-checklist.md).
 
-Сертификаты заказчика кладите по образцу [secrets.example/caddy](secrets.example/caddy/README.md). Каталог `secrets/` в Git не хранится.
+Сертификаты заказчика кладите по образцу [secrets.example/tls](secrets.example/tls/README.md). Каталог `secrets/` в Git не хранится. В режиме `gateway internal` туда же выпускается локальный CA: корневой сертификат для клиентов — `secrets/tls/internal-ca.crt`.
 
 ## Документация
 
@@ -113,7 +113,8 @@ PowerShell — те же команды в `.\model.ps1`, флаг `-GpuMetrics`
 
 - `start` останавливает оба vLLM-слота перед запуском выбранного.
 - `start-many` требует `ALLOW_CONCURRENT_MODELS=true` и не проверяет VRAM.
-- `gateway migration`/`external` требуют файлы из `TLS_CERTS_DIR` и валидируют Caddyfile перед запуском.
+- `gateway migration`/`external` требуют файлы из `TLS_CERTS_DIR`, проверяют, что ключ читается под UID 101, и прогоняют `nginx -t` перед запуском.
+- `gateway internal`/`migration` выпускают сертификат локального CA в `TLS_CERTS_DIR`. Ключ CA переиспользуется, leaf перевыпускается при смене имён или за 30 дней до истечения.
 - `observability remote` требует заполненные `REMOTE_*` URL и токены; локальные LGTM останавливаются, volumes сохраняются.
 - Команды `gateway` и `observability` записывают выбранный режим обратно в `.env`, чтобы прямой `docker compose up` его не откатывал.
 
@@ -124,15 +125,15 @@ PowerShell — те же команды в `.\model.ps1`, флаг `-GpuMetrics`
 | `observability local` | весь стек + Prometheus, Loki, Tempo, Grafana | нет внешнего мониторинга |
 | `observability remote` | весь стек + только Alloy | есть удалённый LGTM заказчика |
 | `observability off` | весь стек без телеметрии | endpoints мониторинга ещё неизвестны |
-| `gateway internal` | Caddy с самоподписанным CA | пилот, быстрый старт |
+| `gateway internal` | nginx с сертификатом локального CA | пилот, быстрый старт |
 | `gateway migration` | старые имена на internal CA, новые на внешнем сертификате | окно смены DNS |
 | `gateway external` | сертификат заказчика на обоих именах | постоянная эксплуатация |
 
 ## Важные ограничения
 
 - Одновременно одна модель — безопасный default для 12 GB VRAM.
-- Слотов ровно два (`main`, `alt`). Третий добавляется правкой compose, LiteLLM и обоих скриптов — см. [model-operations.md](docs/model-operations.md).
-- Плавающий nightly заменён pinned digest в `.env.example`; обновляйте digest и model revision осознанно и по одному.
+- Слотов из коробки два (`main`, `alt`). Слоты выводятся из профилей Compose, поэтому третий добавляется правкой только `compose.yaml` и `config/litellm.yaml` — скрипты менять не нужно, см. [model-operations.md](docs/model-operations.md).
+- Образ vLLM закреплён релизным тегом, модель — неизменяемым commit'ом. Обновляйте по одному фактору за раз: образ **или** модель, никогда оба сразу.
 - Развёртывание, firewall, DNS, trust stores и приёмку выполняет оператор по [docs/verification.md](docs/verification.md).
 - `LITELLM_SALT_KEY` после первого запуска не меняйте.
 - Не используйте `docker compose down -v`, если нужны данные: это удалит ключи, чаты, телеметрию и приватный ключ internal CA.

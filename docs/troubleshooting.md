@@ -8,10 +8,10 @@
 ./model.sh status                                   # что вообще запущено
 docker compose ps -a                                # включая упавшие контейнеры
 docker compose --profile main logs --tail=100 vllm-main
-docker compose logs --tail=50 litellm caddy alloy
+docker compose logs --tail=50 litellm nginx alloy
 ```
 
-Правило: сначала смотрите **самый нижний** отказавший слой. Если vLLM не поднялся, разбираться с Caddy бессмысленно.
+Правило: сначала смотрите **самый нижний** отказавший слой. Если vLLM не поднялся, разбираться с nginx бессмысленно.
 
 ---
 
@@ -75,7 +75,7 @@ docker compose --profile main logs --tail=50 vllm-main
 1. Убедиться, что запущен ровно один слот: `./model.sh stop && ./model.sh start main`.
 2. Снизить контекст: `MAIN_VLLM_MAX_MODEL_LEN=4096`.
 3. Снизить бюджет процесса: `MAIN_VLLM_GPU_MEMORY_UTILIZATION=0.80`.
-4. Уменьшить `MAIN_MAX_IMAGES`.
+4. Уменьшить лимит картинок: `--limit-mm-per-prompt.image` в `MAIN_EXTRA_ARGS`.
 5. В крайнем случае — `MAIN_CPU_OFFLOAD_GB=2` (заметно медленнее).
 
 Снижение `max-model-len` **не уменьшает размер весов** — только KV-cache. Если не помещаются сами веса, нужна модель меньше или сильнее квантованная.
@@ -115,7 +115,7 @@ sed -i 's/\r$//' model.sh
 chmod +x model.sh
 ```
 
-Правильный способ получить файлы на Ubuntu — `git clone`: репозиторий содержит [.gitattributes](../.gitattributes), который принудительно выдаёт LF для `*.sh`, Caddyfile, `*.yaml` и `*.alloy`.
+Правильный способ получить файлы на Ubuntu — `git clone`: репозиторий содержит [.gitattributes](../.gitattributes), который принудительно выдаёт LF для `*.sh`, конфигурации nginx, `*.yaml` и `*.alloy`.
 
 ---
 
@@ -154,7 +154,7 @@ docker compose ps
 docker compose logs --tail=50 open-webui litellm postgres
 ```
 
-**Причина.** Caddy зависит от healthy `litellm` и `open-webui`, а `open-webui` — от healthy `litellm`, который в свою очередь ждёт healthy `postgres`. Отказ внизу цепочки блокирует Caddy.
+**Причина.** nginx зависит от healthy `litellm` и `open-webui`, а `open-webui` — от healthy `litellm`, который в свою очередь ждёт healthy `postgres`. Отказ внизу цепочки блокирует nginx.
 
 **Что сделать.** Чинить самый нижний нездоровый сервис. Типичные варианты:
 
@@ -171,7 +171,7 @@ docker compose logs --tail=50 open-webui litellm postgres
 sudo ss -lntp | grep ':443'
 ```
 
-**Причина.** Порт занят другим сервисом (nginx, Apache, другой Caddy) или прошлым контейнером.
+**Причина.** Порт занят посторонним веб-сервером (Apache, IIS, чужой nginx) или прошлым контейнером этого же стека.
 
 **Что сделать.** Освободить порт либо задать другой в `.env`:
 
@@ -185,14 +185,13 @@ PUBLIC_HTTPS_PORT=8443
 
 ## 10. `curl: (60) SSL certificate problem: self signed certificate in certificate chain`
 
-**Причина.** Режим `gateway internal`, а root CA Caddy не установлен в trust store клиента.
+**Причина.** Режим `gateway internal`, а root CA локального центра не установлен в trust store клиента.
 
-**Что сделать** — установить CA, а не добавлять `-k`:
+**Что сделать** — установить CA, а не добавлять `-k`. Корневой сертификат лежит файлом в `TLS_CERTS_DIR`, доставать его из контейнера не нужно:
 
 ```bash
-docker compose --profile gateway cp \
-  caddy:/data/caddy/pki/authorities/local/root.crt ./caddy-local-root.crt
-sudo install -m 0644 caddy-local-root.crt /usr/local/share/ca-certificates/caddy-local-root.crt
+sudo install -m 0644 secrets/tls/internal-ca.crt \
+  /usr/local/share/ca-certificates/vlm-internal-ca.crt
 sudo update-ca-certificates
 ```
 
@@ -204,10 +203,10 @@ sudo update-ca-certificates
 
 ```powershell
 # 1. установить root CA в хранилище Windows (правильный путь)
-Import-Certificate -FilePath .\caddy-local-root.crt -CertStoreLocation Cert:\LocalMachine\Root
+Import-Certificate -FilePath .\internal-ca.crt -CertStoreLocation Cert:\LocalMachine\Root
 
 # 2. либо проверять Linux-курлом из контейнера
-docker run --rm -v "${PWD}\caddy-local-root.crt:/ca.crt:ro" curlimages/curl:latest `
+docker run --rm -v "${PWD}\internal-ca.crt:/ca.crt:ro" curlimages/curl:latest `
   --cacert /ca.crt --resolve api.vlm.local:443:<host-ip> https://api.vlm.local/v1/models
 ```
 
@@ -234,19 +233,19 @@ openssl s_client -connect api.vlm.local:443 -servername api.vlm.local </dev/null
 
 **Причина.** Ключ не тот. Через 443 нужен LiteLLM virtual key (или master key), а **не** `VLLM_API_KEY` — последний внутренний, между LiteLLM и vLLM.
 
-**Что сделать.** Проверить в обход Caddy, чтобы отделить проблему шлюза от проблемы ключа:
+**Что сделать.** Проверить в обход nginx, чтобы отделить проблему шлюза от проблемы ключа:
 
 ```bash
 curl -fsS http://127.0.0.1:4000/v1/models -H "Authorization: Bearer $LITELLM_MASTER_KEY"
 ```
 
-Если loopback работает, а HTTPS нет — проблема в Caddy/TLS. Если не работает и loopback — неверный ключ или ключ отозван.
+Если loopback работает, а HTTPS нет — проблема в nginx/TLS. Если не работает и loopback — неверный ключ или ключ отозван.
 
 ---
 
 ## 13. `/key/generate` через HTTPS отдаёт 404
 
-**Это не ошибка, а замысел.** Публичный API-route в [caddy/routes.caddy](../caddy/routes.caddy) пропускает только `/v1` и `/v1/*`; админские эндпоинты и UI LiteLLM наружу закрыты.
+**Это не ошибка, а замысел.** Публичный API-route в [nginx/routes/api.conf](../nginx/routes/api.conf) пропускает только `/v1` и `/v1/*`; админские эндпоинты и UI LiteLLM наружу закрыты.
 
 Создавайте ключи с самого хоста через loopback:
 
@@ -357,7 +356,7 @@ rm -rf data/huggingface/models--<старая-модель>   # только п�
 
 ## 19. После перезагрузки хоста стек не поднялся полностью
 
-**Причина.** У всех сервисов стоит `restart: unless-stopped`, но сервисы под профилями (`vllm-*`, `caddy`, LGTM) вернутся только если контейнеры существовали. Если перед reboot был выполнен `./model.sh stop`, слот останется остановленным намеренно.
+**Причина.** У всех сервисов стоит `restart: unless-stopped`, но сервисы под профилями (`vllm-*`, `nginx`, LGTM) вернутся только если контейнеры существовали. Если перед reboot был выполнен `./model.sh stop`, слот останется остановленным намеренно.
 
 **Что сделать**
 
@@ -372,14 +371,14 @@ rm -rf data/huggingface/models--<старая-модель>   # только п�
 
 ---
 
-## 20. Заменили файлы сертификата, а Caddy отдаёт старый
+## 20. Заменили файлы сертификата, а nginx отдаёт старый
 
-**Причина.** Caddy читает cert/key при старте конфигурации. Подмена файлов на диске сама по себе перечитывания не вызывает.
+**Причина.** nginx читает cert/key при старте конфигурации. Подмена файлов на диске сама по себе перечитывания не вызывает.
 
 **Что сделать**
 
 ```bash
-docker compose --profile gateway restart caddy
+docker compose --profile gateway restart nginx
 ```
 
 Проверить, что отдаётся именно новый сертификат:
@@ -393,15 +392,15 @@ openssl s_client -connect api.vlm.local:443 -servername api.vlm.local </dev/null
 
 ## 21. После `gateway external` вернулся internal-сертификат
 
-**Причина.** Команда `gateway` задаёт `CADDY_CONFIG_FILE` для своего вызова Compose. Если после неё выполнить голый `docker compose up -d`, будет использовано значение из `.env`.
+**Причина.** Команда `gateway` задаёт `NGINX_CONFIG_FILE` для своего вызова Compose. Если после неё выполнить голый `docker compose up -d`, будет использовано значение из `.env`.
 
 **Что сделать.** Убедиться, что `.env` содержит актуальный режим:
 
 ```bash
-grep -n 'CADDY_CONFIG_FILE\|ALLOY_CONFIG_FILE' .env
+grep -n 'NGINX_CONFIG_FILE\|ALLOY_CONFIG_FILE' .env
 ```
 
-Начиная с текущей версии скрипты записывают выбранный режим обратно в `.env` — если значение разошлось, значит Caddy поднимали не через `./model.sh gateway`.
+Начиная с текущей версии скрипты записывают выбранный режим обратно в `.env` — если значение разошлось, значит nginx поднимали не через `./model.sh gateway`.
 
 ---
 
@@ -429,13 +428,13 @@ print('reasoning:', bool(m.get('reasoning_content'))); print('content:', repr(m.
 
 - увеличить `max_tokens`: для этой модели ответу «одним словом» реально требуется 200–600 токенов, потому что рассуждение тоже считается;
 - в клиенте читать оба поля: `content` показывать пользователю, `reasoning_content` — только в отладке;
-- если рассуждение не нужно вовсе, убрать `MAIN_REASONING_PARSER` из `.env` и пересоздать слот. Тогда всё придёт в `content`, но модель может выводить служебные теги прямо в текст.
+- если рассуждение не нужно вовсе, убрать `--reasoning-parser` из `MAIN_EXTRA_ARGS` и пересоздать слот. Тогда всё придёт в `content`, но модель может выводить служебные теги прямо в текст.
 
 ---
 
 ## 23. Модель отвечает, но tool calling или reasoning не работает
 
-**Причина.** Parsers привязаны к конкретному семейству моделей. `MAIN_TOOL_CALL_PARSER=qwen3_coder` и `MAIN_REASONING_PARSER=qwen3` подходят Qwen3; для другой модели их нужно менять вместе с моделью.
+**Причина.** Parsers привязаны к конкретному семейству моделей. Флаги `--tool-call-parser qwen3_coder` и `--reasoning-parser qwen3` в `MAIN_EXTRA_ARGS` подходят Qwen3; для другой модели их нужно менять вместе с моделью. Пустое значение `MAIN_EXTRA_ARGS=` убирает все флаги семейства — это и есть штатный вариант для моделей без reasoning и tool calling.
 
 **Что сделать.** Свериться с документацией vLLM по поддерживаемым parsers для вашей модели и обновить `.env`. Обратите внимание: у слота `alt` в [compose.yaml](../compose.yaml) вообще нет `--enable-auto-tool-choice` — tool calling там не включён.
 

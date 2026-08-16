@@ -8,9 +8,9 @@
 
 ```mermaid
 flowchart LR
-  client[Клиент] -->|"HTTPS 443 + Bearer virtual key"| caddy[Caddy]
-  caddy -->|"api hostname, только /v1/*"| litellm[LiteLLM]
-  caddy -->|"chat hostname, все пути"| webui[Open WebUI]
+  client[Клиент] -->|"HTTPS 443 + Bearer virtual key"| nginx[nginx]
+  nginx -->|"api hostname, только /v1/*"| litellm[LiteLLM]
+  nginx -->|"chat hostname, все пути"| webui[Open WebUI]
   webui -->|"virtual key"| litellm
   litellm -->|"проверка ключа, лимитов, бюджета"| postgres[(PostgreSQL)]
   litellm -->|"http://vllm-main:8000/v1"| vllm[Активный vLLM]
@@ -18,15 +18,15 @@ flowchart LR
   litellm -->|"usage в spend logs"| postgres
 ```
 
-Ключевое следствие: клиент никогда не разговаривает с vLLM напрямую. Между ними всегда два слоя — Caddy (TLS и срез путей) и LiteLLM (аутентификация и учёт).
+Ключевое следствие: клиент никогда не разговаривает с vLLM напрямую. Между ними всегда два слоя — nginx (TLS и срез путей) и LiteLLM (аутентификация и учёт).
 
 ## Режим `local`: всё на одном сервере
 
 ```mermaid
 flowchart LR
-  clientsLocal[Клиенты] -->|"HTTPS 443"| caddyLocal[Caddy]
-  caddyLocal -->|"api hostname"| litellmLocal[LiteLLM]
-  caddyLocal -->|"chat hostname"| webuiLocal[Open WebUI]
+  clientsLocal[Клиенты] -->|"HTTPS 443"| nginxLocal[nginx]
+  nginxLocal -->|"api hostname"| litellmLocal[LiteLLM]
+  nginxLocal -->|"chat hostname"| webuiLocal[Open WebUI]
   litellmLocal --> vllmLocal[Активный vLLM]
   litellmLocal --> postgresLocal[(PostgreSQL)]
   webuiLocal --> litellmLocal
@@ -45,9 +45,9 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  clients[Клиенты] -->|"HTTPS 443"| caddy[Caddy]
-  caddy -->|"api host"| litellm[LiteLLM]
-  caddy -->|"chat host"| webui[Open WebUI]
+  clients[Клиенты] -->|"HTTPS 443"| nginx[nginx]
+  nginx -->|"api host"| litellm[LiteLLM]
+  nginx -->|"chat host"| webui[Open WebUI]
   litellm --> vllm[Активный vLLM]
   litellm --> postgres[(PostgreSQL)]
   webui --> litellm
@@ -71,7 +71,7 @@ flowchart LR
 | **vLLM** | Собственно inference-движок. Отдаёт OpenAI-совместимый API на внутреннем `:8000` | Ничего не работает | Да |
 | **LiteLLM** | Virtual keys с model allowlist, RPM/TPM и бюджетом; стабильное API-имя модели при смене слота; учёт usage; метрики и трейсы | Клиенты идут прямо в vLLM с одним общим `VLLM_API_KEY`: нельзя отозвать доступ одному клиенту, нет учёта, нет лимитов, смена модели ломает клиентов | Да |
 | **PostgreSQL** | Хранилище virtual keys и spend logs LiteLLM | Ключи и учёт не переживут рестарт LiteLLM | Да |
-| **Caddy** | Единственный вход на 443. Терминирует TLS и **режет пути**: наружу проходит только `/v1/*`, админский `/key/generate` и UI LiteLLM получают 404 | Админские эндпоинты LiteLLM торчат в клиентскую сеть; нет TLS | Да для пилота, нет для локальной отладки |
+| **nginx** | Единственный вход на 443. Терминирует TLS и **режет пути**: наружу проходит только `/v1/*`, админский `/key/generate` и UI LiteLLM получают 404 | Админские эндпоинты LiteLLM торчат в клиентскую сеть; нет TLS | Да для пилота, нет для локальной отладки |
 | **Open WebUI** | Чат-интерфейс для людей | Останется только API — для машинных клиентов этого достаточно | Нет |
 | **Alloy** | Один агент собирает три сигнала (метрики scrape, Docker-логи, OTLP-трейсы) и умеет писать либо в локальный LGTM, либо в удалённый — без правки приложений | Нет наблюдаемости. Приложения продолжат работать, но OTLP-экспорт будет писать ошибки в логи | Нет |
 | **Prometheus / Loki / Tempo** | Локальное хранение метрик / логов / трейсов | В режиме `local` Alloy некуда писать | Нет, если режим `remote` |
@@ -91,7 +91,7 @@ docker compose --profile main up -d postgres litellm vllm-main
 curl -H "Authorization: Bearer $LITELLM_MASTER_KEY" http://127.0.0.1:4000/v1/models
 ```
 
-Всё остальное — Caddy, Open WebUI, Alloy, LGTM — добавляется поверх и не требуется для inference. Это полезно при диагностике: если минимальный набор работает, а через 443 нет — проблема в Caddy/DNS/TLS, а не в модели.
+Всё остальное — nginx, Open WebUI, Alloy, LGTM — добавляется поверх и не требуется для inference. Это полезно при диагностике: если минимальный набор работает, а через 443 нет — проблема в nginx/DNS/TLS, а не в модели.
 
 ## Матрица режимов
 
@@ -102,9 +102,9 @@ curl -H "Authorization: Bearer $LITELLM_MASTER_KEY" http://127.0.0.1:4000/v1/mod
 | `observability off` | Останавливает Alloy и локальные LGTM; обслуживание не трогает | Адреса мониторинга ещё неизвестны |
 | `start main` \| `start alt` | Выбранный слот vLLM (и базовые сервисы) | Всегда, после observability |
 | `start-many main alt` | Оба слота сразу; требует `ALLOW_CONCURRENT_MODELS=true` | Только при доказанном запасе VRAM |
-| `gateway internal` | Caddy с самоподписанным internal CA | Быстрый старт, пилот |
-| `gateway migration` | Caddy: старые имена на internal CA, новые на внешнем сертификате | Окно смены DNS-имён |
-| `gateway external` | Caddy на сертификате заказчика | Постоянная эксплуатация |
+| `gateway internal` | nginx с самоподписанным internal CA | Быстрый старт, пилот |
+| `gateway migration` | nginx: старые имена на internal CA, новые на внешнем сертификате | Окно смены DNS-имён |
+| `gateway external` | nginx на сертификате заказчика | Постоянная эксплуатация |
 
 > **Важно.** `observability local` и `observability remote` поднимают не только телеметрию. Любая команда `docker compose up` без фильтра сервисов стартует все сервисы **без профиля** — то есть PostgreSQL, LiteLLM и Open WebUI. Поэтому `observability` — это первая команда развёртывания, а не опциональный шаг.
 
@@ -116,20 +116,20 @@ curl -H "Authorization: Bearer $LITELLM_MASTER_KEY" http://127.0.0.1:4000/v1/mod
 | `local-observability` | prometheus, loki, tempo, grafana | `observability local` |
 | `main` / `alt` | vllm-main / vllm-alt | `start`, `start-many` |
 | `gpu-metrics` | nvidia-gpu-exporter | флаг `--gpu-metrics` |
-| `gateway` | caddy | `gateway <mode>` |
+| `gateway` | nginx | `gateway <mode>` |
 
 Alloy вынесен в профиль намеренно: иначе `observability off` откатывался бы обратно при следующем `start main`.
 
 ## Сети и границы
 
 ```text
-edge     : caddy, litellm, open-webui
+edge     : nginx, litellm, open-webui
 backend  : litellm, open-webui, vllm-*, postgres, alloy, prometheus, loki, tempo, grafana
 ```
 
-Caddy находится **только** в `edge`. У него нет сетевого маршрута к PostgreSQL, Alloy, Docker socket и хранилищам телеметрии. LiteLLM и Open WebUI стоят в обеих сетях, потому что принимают трафик от Caddy и ходят в backend.
+nginx находится **только** в `edge`. У него нет сетевого маршрута к PostgreSQL, Alloy, Docker socket и хранилищам телеметрии. LiteLLM и Open WebUI стоят в обеих сетях, потому что принимают трафик от nginx и ходят в backend.
 
-Наружу опубликован один порт: `${PUBLIC_BIND_ADDRESS}:${PUBLIC_HTTPS_PORT}` → Caddy. Все диагностические порты (LiteLLM 4000, Open WebUI 3000, vLLM 8001/8002, Grafana 3001, Prometheus 9090, Alloy 12345) привязаны к `127.0.0.1` и доступны только через SSH tunnel.
+Наружу опубликован один порт: `${PUBLIC_BIND_ADDRESS}:${PUBLIC_HTTPS_PORT}` → nginx. Все диагностические порты (LiteLLM 4000, Open WebUI 3000, vLLM 8001/8002, Grafana 3001, Prometheus 9090, Alloy 12345) привязаны к `127.0.0.1` и доступны только через SSH tunnel.
 
 Docker-сеть сама по себе не является границей безопасности, если сервис публикует host port. Проверяйте фактические привязки: `docker compose config` и `ss -lntp`.
 
@@ -139,23 +139,25 @@ Docker-сеть сама по себе не является границей б
 
 | Слой | Образы (факт) | Из чего складывается |
 |---|---|---|
-| core: Postgres + LiteLLM + Open WebUI + Alloy + Caddy | **~7.0 GiB** | Open WebUI 4.99 + LiteLLM 1.09 + Alloy 0.54 + Postgres 0.30 + Caddy 0.06 |
+| core: Postgres + LiteLLM + Open WebUI + Alloy + nginx | **~7.0 GiB** | Open WebUI 4.99 + LiteLLM 1.09 + Alloy 0.54 + Postgres 0.30 + nginx 0.05 |
 | `+ local-observability` | **+1.7 GiB** | Grafana 1.16 + Prometheus 0.30 + Loki 0.12 + Tempo 0.12 |
 | `+ vLLM` и GPU exporter | **+19.8 GiB** | образ vLLM 19.7 — самая тяжёлая позиция стека |
-| кэш модели Qwen3.5-4B-AWQ | **+~4 GiB** | `data/huggingface`, вне образов |
+| кэш модели Qwen3.5-4B-AWQ | **+~5.8 GiB** | `data/huggingface`, вне образов |
 
-Итого для полного стенда с одной моделью: **~32 GiB** образов и весов до того, как начнут расти volumes телеметрии. Отсюда требование в 60 GiB — запас нужен на вторую revision модели при обновлении и на Prometheus/Loki/Tempo.
+Итого для полного стенда с одной моделью: **~34 GiB** образов и весов до того, как начнут расти volumes телеметрии. Отсюда требование в 60 GiB — запас нужен на вторую revision модели при обновлении и на Prometheus/Loki/Tempo.
+
+Оперативная память, замерено на простое при одной загруженной модели:
+
+| Слой | RAM | Крупнейшие потребители |
+|---|---|---|
+| core | **~1.9 GiB** | LiteLLM 873 MiB + Open WebUI 715 MiB + Alloy 242 MiB + Postgres 59 MiB + nginx 12 MiB |
+| `+ local-observability` | **+0.7 GiB** | Tempo 326 MiB + Grafana 184 MiB + Loki 110 MiB + Prometheus 100 MiB |
+| `+ vLLM` и GPU exporter | **+5.1 GiB** | процесс vLLM 5.10 GiB |
+| **итого** | **~7.7 GiB** | под нагрузкой выше |
+
+VRAM считается отдельно: `Qwen3.5-4B-AWQ` при `gpu-memory-utilization=0.85` занимает около 11.1 GiB из 12.3 GiB карты вместе с KV-кэшем. nginx — самый дешёвый сервис стека и по образу, и по памяти.
 
 Как снять фактические значения на своём стенде:
-
-```bash
-docker system df -v
-docker stats --no-stream
-nvidia-smi --query-gpu=memory.used,memory.total --format=csv
-du -sh data/huggingface
-```
-
-Как измерить фактические значения:
 
 ```bash
 docker stats --no-stream

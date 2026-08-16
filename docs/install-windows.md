@@ -114,15 +114,16 @@ docker compose up -d --force-recreate open-webui
 127.0.0.1 chat.vlm.local
 ```
 
-Скопируйте root CA из Caddy:
+Корневой сертификат локального центра выпускается командой `gateway internal` и лежит файлом — копировать из контейнера нечего:
 
 ```powershell
-docker compose --profile gateway cp `
-  caddy:/data/caddy/pki/authorities/local/root.crt `
-  .\caddy-local-root.crt
+Import-Certificate -FilePath .\secrets\tls\internal-ca.crt `
+  -CertStoreLocation Cert:\LocalMachine\Root
 ```
 
-Установите root CA Caddy в хранилище `Trusted Root Certification Authorities` только на доверенных тестовых машинах. Не используйте `-k`/`--insecure`: это скрывает ошибки DNS, цепочки доверия и подмену сервера. Подробности — в [быстром старте HTTPS](quick-start-https.md).
+Команда требует прав администратора. **Без этого шага проверки через `curl.exe` работать не будут**: и встроенный curl, и curl из Git Bash используют Schannel, который доверяет только хранилищу Windows и игнорирует `--cacert`.
+
+Устанавливайте root CA в хранилище `Trusted Root Certification Authorities` только на доверенных тестовых машинах. Не используйте `-k`/`--insecure`: это скрывает ошибки DNS, цепочки доверия и подмену сервера. Подробности — в [быстром старте HTTPS](quick-start-https.md).
 
 ## Ограничения Windows
 
