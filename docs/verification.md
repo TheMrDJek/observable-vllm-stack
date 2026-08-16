@@ -100,7 +100,7 @@ curl -fsS http://127.0.0.1:4000/key/generate \
 curl -fsS http://127.0.0.1:4000/key/generate \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"key_alias":"acceptance","models":["qwen3.5-4b-awq","qwen3-4b-awq"]}'
+  -d '{"key_alias":"acceptance","models":["qwen3.5-4b-awq"]}'
 ```
 
 ## 4. TLS и маршрутизация
