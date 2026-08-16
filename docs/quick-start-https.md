@@ -2,21 +2,20 @@
 
 Клиентский вход в стек — только TCP/443:
 
-- `https://api.vlm.local` → LiteLLM/OpenAI-compatible API;
-- `https://chat.vlm.local` → Open WebUI.
+- `https://vlm.rpa.local/v1/*` → LiteLLM, OpenAI-совместимый API;
+- `https://vlm.rpa.local/ui` → админка LiteLLM, если адрес попадает в `ADMIN_ALLOW_CIDR`.
 
-Внутренние сервисы остаются на Docker networks или loopback. Прямой доступ к LiteLLM, vLLM, Grafana и хранилищам извне запрещён.
+Внутренние сервисы остаются на Docker networks или loopback. Прямой доступ к vLLM, Grafana и хранилищам извне запрещён.
 
 ## 1. DNS
 
-Создайте обе записи на IP хоста. Для временного пилота допустимы внутренний DNS или hosts-файлы:
+Создайте запись на IP хоста. Для временного пилота допустимы внутренний DNS или hosts-файлы:
 
 ```text
-<server-ip> api.vlm.local
-<server-ip> chat.vlm.local
+<server-ip> vlm.rpa.local
 ```
 
-Это значения `PUBLIC_API_HOST` и `PUBLIC_CHAT_HOST` из `.env`; при изменении используйте новые имена во всех командах. Проверьте с каждого клиента, что оба имени разрешаются именно в ожидаемый IP. Не тестируйте HTTPS по IP: сертификат выпускается на DNS-имена.
+Имя собирается из `PUBLIC_HOST` и `DNS_ZONE` в `.env`. Проверьте с каждого клиента, что оно разрешается именно в ожидаемый IP. Не тестируйте HTTPS по IP: сертификат выпускается на DNS-имена.
 
 ## 2. Internal CA
 
@@ -74,19 +73,19 @@ Internal root CA даёт право выпускать доверенные с�
 ```bash
 curl --fail --show-error \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
-  https://api.vlm.local/v1/models
+  https://vlm.rpa.local/v1/models
 ```
 
 PowerShell:
 
 ```powershell
 $headers = @{ Authorization = "Bearer $env:LITELLM_MASTER_KEY" }
-Invoke-RestMethod -Uri "https://api.vlm.local/v1/models" -Headers $headers
+Invoke-RestMethod -Uri "https://vlm.rpa.local/v1/models" -Headers $headers
 ```
 
 > **На Windows сначала поставьте root CA в хранилище (шаг 3).** И `curl.exe`, и curl из Git Bash используют Schannel, который берёт доверие только из системного хранилища Windows и **игнорирует `--cacert`**. Попытка проверить с флагом `--cacert`, не установив корень, завершается не понятной ошибкой сертификата, а обрывом рукопожатия: `schannel: failed to receive handshake` и `HTTP 000`.
 
-Откройте `https://chat.vlm.local` в браузере. Проверка считается успешной, только если:
+Откройте `https://vlm.rpa.local` в браузере. Проверка считается успешной, только если:
 
 - нет предупреждения сертификата;
 - URL использует DNS-имя, а не IP;

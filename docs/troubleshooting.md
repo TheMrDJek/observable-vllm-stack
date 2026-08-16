@@ -96,11 +96,10 @@ grep -n CHANGE_ME .env
 
 ```bash
 echo "sk-$(openssl rand -hex 24)"   # LITELLM_MASTER_KEY, LITELLM_SALT_KEY, VLLM_API_KEY
-openssl rand -hex 32                # WEBUI_SECRET_KEY (64 hex-символа)
 openssl rand -base64 24             # POSTGRES_PASSWORD, GRAFANA_ADMIN_PASSWORD
 ```
 
-`OPEN_WEBUI_LITELLM_KEY` при первом запуске остаётся **пустым** — это не placeholder.
+`LITELLM_UI_PASSWORD` — не placeholder, но задать его нужно: при пустом значении вход в админку LiteLLM идёт по master-ключу.
 
 ---
 
@@ -145,16 +144,16 @@ docker compose --profile main up -d --force-recreate vllm-main
 
 ---
 
-## 8. `dependency failed to start: container ...-open-webui-1 is unhealthy`
+## 8. `dependency failed to start: container ...-litellm-1 is unhealthy`
 
 **Проверка**
 
 ```bash
 docker compose ps
-docker compose logs --tail=50 open-webui litellm postgres
+docker compose logs --tail=50 litellm postgres
 ```
 
-**Причина.** nginx зависит от healthy `litellm` и `open-webui`, а `open-webui` — от healthy `litellm`, который в свою очередь ждёт healthy `postgres`. Отказ внизу цепочки блокирует nginx.
+**Причина.** nginx зависит от healthy `litellm`, а тот ждёт healthy `postgres`. Отказ внизу цепочки блокирует шлюз.
 
 **Что сделать.** Чинить самый нижний нездоровый сервис. Типичные варианты:
 
@@ -179,7 +178,7 @@ sudo ss -lntp | grep ':443'
 PUBLIC_HTTPS_PORT=8443
 ```
 
-Тогда клиентский URL становится `https://api.vlm.local:8443`. На Windows порт может держать служба `http.sys` — проверяйте `netstat -ano | findstr :443`.
+Тогда клиентский URL становится `https://vlm.rpa.local:8443`. На Windows порт может держать служба `http.sys` — проверяйте `netstat -ano | findstr :443`.
 
 ---
 
@@ -207,7 +206,7 @@ Import-Certificate -FilePath .\internal-ca.crt -CertStoreLocation Cert:\LocalMac
 
 # 2. либо проверять Linux-курлом из контейнера
 docker run --rm -v "${PWD}\internal-ca.crt:/ca.crt:ro" curlimages/curl:latest `
-  --cacert /ca.crt --resolve api.vlm.local:443:<host-ip> https://api.vlm.local/v1/models
+  --cacert /ca.crt --resolve vlm.rpa.local:443:<host-ip> https://vlm.rpa.local/v1/models
 ```
 
 Проверить используемый бэкенд: `curl --version` — в строке должно быть `OpenSSL`, а не `Schannel`.
@@ -219,8 +218,8 @@ docker run --rm -v "${PWD}\internal-ca.crt:/ca.crt:ro" curlimages/curl:latest `
 **Проверка**
 
 ```bash
-getent hosts api.vlm.local chat.vlm.local
-openssl s_client -connect api.vlm.local:443 -servername api.vlm.local </dev/null 2>/dev/null | openssl x509 -noout -subject -ext subjectAltName -dates
+getent hosts vlm.rpa.local vlm.rpa.local
+openssl s_client -connect vlm.rpa.local:443 -servername vlm.rpa.local </dev/null 2>/dev/null | openssl x509 -noout -subject -ext subjectAltName -dates
 ```
 
 **Причина.** Нет DNS/hosts-записей, либо обращение идёт по IP. Сертификат выпускается на DNS-имена, на IP он не подходит.
@@ -253,31 +252,27 @@ curl -fsS http://127.0.0.1:4000/v1/models -H "Authorization: Bearer $LITELLM_MAS
 curl -fsS http://127.0.0.1:4000/key/generate \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"key_alias":"open-webui","models":["qwen3.5-4b-awq"]}'
+  -d '{"key_alias":"client-app","models":["qwen3.5-4b-awq"]}'
 ```
 
 С рабочего ноутбука — через SSH tunnel: `ssh -L 4000:127.0.0.1:4000 <user>@<server>`.
 
 ---
 
-## 14. В Open WebUI пустой список моделей
+## 14. Клиент не видит модель в `/v1/models`
 
 **Проверка**
 
 ```bash
-grep -n OPEN_WEBUI_LITELLM_KEY .env
-docker compose logs --tail=30 open-webui
+curl -fsS http://127.0.0.1:4000/v1/models -H "Authorization: Bearer $LITELLM_MASTER_KEY"
+./model.sh status
 ```
 
 **Причины и что сделать**
 
-1. `OPEN_WEBUI_LITELLM_KEY` пуст — так и задумано при первом запуске. Создайте virtual key (см. п. 13), впишите его в `.env` и пересоздайте **только** UI:
-   ```bash
-   docker compose up -d --force-recreate open-webui
-   ```
-2. Ключ вписан, но модели нет в его allowlist. При создании ключа в `models` должны быть перечислены имена из `/v1/models`.
-3. Модель не запущена: `./model.sh start main`.
-4. Имя в [config/litellm.yaml](../config/litellm.yaml) не совпадает с `--served-model-name` в `.env`. Эти два значения обязаны совпадать.
+1. Модели нет в allowlist ключа. При создании virtual key в `models` перечисляются имена из `/v1/models`; ключ без нужного имени модель не покажет.
+2. Модель не запущена: `./model.sh start main`. Остановленный слот остаётся зарегистрированным в LiteLLM и даёт явную ошибку соединения, а не тихий fallback.
+3. Имя в [config/litellm.yaml](../config/litellm.yaml) не совпадает с `--served-model-name` из `.env`. Эти два значения обязаны совпадать, иначе маршрут ломается и модель пропадает из списка.
 
 ---
 
@@ -350,7 +345,7 @@ docker builder prune           # кэш сборки
 rm -rf data/huggingface/models--<старая-модель>   # только после приёмки новой
 ```
 
-**Чего не делать.** `docker compose down -v` и `docker volume prune` удалят PostgreSQL (ключи и учёт), Open WebUI (чаты), Grafana, метрики, логи, трейсы **и приватный ключ internal CA** — после этого всем клиентам придётся переустанавливать root CA.
+**Чего не делать.** `docker compose down -v` и `docker volume prune` удалят PostgreSQL (ключи и учёт), Grafana, метрики, логи и трейсы. Приватный ключ локального CA лежит не в volume, а в `secrets/tls/` — но и его потеря означает переустановку root CA у всех клиентов.
 
 ---
 
@@ -384,7 +379,7 @@ docker compose --profile gateway restart nginx
 Проверить, что отдаётся именно новый сертификат:
 
 ```bash
-openssl s_client -connect api.vlm.local:443 -servername api.vlm.local </dev/null 2>/dev/null \
+openssl s_client -connect vlm.rpa.local:443 -servername vlm.rpa.local </dev/null 2>/dev/null \
   | openssl x509 -noout -subject -issuer -dates -ext subjectAltName
 ```
 
@@ -413,7 +408,7 @@ grep -n 'NGINX_CONFIG_FILE\|ALLOY_CONFIG_FILE' .env
 **Проверка**
 
 ```bash
-curl -fsS https://api.vlm.local/v1/chat/completions \
+curl -fsS https://vlm.rpa.local/v1/chat/completions \
   -H "Authorization: Bearer $CLIENT_VIRTUAL_KEY" -H 'Content-Type: application/json' \
   -d '{"model":"qwen3.5-4b-awq","max_tokens":600,
        "messages":[{"role":"user","content":"Сколько будет 2+2? Ответь только числом."}]}' \

@@ -100,7 +100,7 @@ deployment   = DEPLOYMENT_ID
 environment  = ENVIRONMENT
 site         = SITE
 instance     = INSTANCE_ID
-service      = litellm | vllm-main | open-webui | ...
+service      = litellm | vllm-main | nginx | ...
 model_slot   = main | alt | none
 ```
 
@@ -130,7 +130,7 @@ model_slot   = main | alt | none
 ./model.sh observability off
 ```
 
-Команда останавливает Alloy и локальные Prometheus/Loki/Tempo/Grafana. Обслуживание запросов продолжается: LiteLLM, vLLM, Open WebUI и nginx не затрагиваются.
+Команда останавливает Alloy и локальные Prometheus/Loki/Tempo/Grafana. Обслуживание запросов продолжается: LiteLLM, vLLM и nginx не затрагиваются.
 
 Что важно знать:
 

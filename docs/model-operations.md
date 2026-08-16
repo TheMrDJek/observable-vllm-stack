@@ -289,7 +289,7 @@ grep '^VLLM_IMAGE=' .env
 
 ```bash
 # какие имена доступны прямо сейчас
-curl -fsS https://api.vlm.local/v1/models -H "Authorization: Bearer $CLIENT_VIRTUAL_KEY"
+curl -fsS https://vlm.rpa.local/v1/models -H "Authorization: Bearer $CLIENT_VIRTUAL_KEY"
 ```
 
 ```json
@@ -299,7 +299,6 @@ curl -fsS https://api.vlm.local/v1/models -H "Authorization: Bearer $CLIENT_VIRT
 Что важно знать клиенту:
 
 - **LiteLLM публикует все зарегистрированные модели**, включая те, чей слот сейчас остановлен. Запрос к неактивной модели даёт явную ошибку соединения — молчаливого fallback на другую модель нет и быть не должно;
-- в Open WebUI модель выбирается в списке вверху чата; список ограничен allowlist того virtual key, который записан в `OPEN_WEBUI_LITELLM_KEY`;
 - разным клиентам можно выдать разные virtual keys с разным набором моделей, лимитами RPM/TPM и бюджетом;
 - при переключении слота история диалога на сервере не сохраняется — клиент присылает её целиком в `messages`.
 
@@ -411,7 +410,7 @@ Rollback возвращает весь согласованный набор, а
 
 Если API-имя осталось прежним, клиенты переключатся прозрачно — но совместимость поведения это не гарантирует. Если имя меняется, rollback включает конфигурацию клиентов.
 
-Volumes PostgreSQL/Open WebUI/observability к rollback модели не относятся. Не используйте `down -v`.
+Volumes PostgreSQL и observability к rollback модели не относятся. Не используйте `down -v`.
 
 ## Расчёт ресурсов
 

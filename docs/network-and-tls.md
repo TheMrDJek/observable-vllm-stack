@@ -5,29 +5,35 @@
 Единственная клиентская точка входа — nginx на `443/tcp`.
 
 ```text
-клиент ── HTTPS/443 ── nginx
-                        ├── api.vlm.local  ── LiteLLM:4000
-                        └── chat.vlm.local ── Open WebUI:8080
+клиент ── HTTPS/443 ── nginx ── vlm.rpa.local
+                                 ├── /v1/*    ── LiteLLM:4000  (инференс)
+                                 └── остальное ── LiteLLM:4000  (админка, allow/deny по IP)
 ```
 
 PostgreSQL, vLLM, Prometheus, Loki, Tempo и Alloy не являются клиентскими endpoints. Grafana также не публикуется наружу без отдельного решения по аутентификации и доступу. Docker-сети не считаются самостоятельной защитной границей, если сервис публикует host port.
 
-Compose публикует nginx на `${PUBLIC_BIND_ADDRESS:-0.0.0.0}:${PUBLIC_HTTPS_PORT:-443}`. Диагностические порты LiteLLM, Open WebUI, vLLM, Grafana, Prometheus и Alloy привязаны к `127.0.0.1`.
+Compose публикует nginx на `${PUBLIC_BIND_ADDRESS:-0.0.0.0}:${PUBLIC_HTTPS_PORT:-443}`. Диагностические порты LiteLLM, vLLM, Grafana, Prometheus и Alloy привязаны к `127.0.0.1`.
 
-## Имена
+## Имя
 
-Используйте два стабильных имени:
+Стек публикует **одно** имя, которое собирается из двух переменных:
 
-- `PUBLIC_API_HOST=api.vlm.local` — машинные OpenAI-compatible клиенты;
-- `PUBLIC_CHAT_HOST=chat.vlm.local` — браузерный UI.
+```dotenv
+PUBLIC_HOST=vlm
+DNS_ZONE=rpa.local      # итог: vlm.rpa.local
+```
 
-Не объединяйте их path routing на одном имени без необходимости: отдельные имена упрощают политики, сертификаты, логи и будущий перенос. Сертификат может быть единым SAN или отдельным на каждое имя.
+Метка зоны разводит развёртывания: у двух заказчиков со своими стендами LiteLLM записи в DNS не столкнутся. Смена зоны — правка одной строки, включая переход на реальный домен (`DNS_ZONE=rpa.example.com`).
 
-Для internal CA имена должны разрешаться внутренним DNS/hosts. Для external-режима готовый сертификат должен покрывать оба имени. Сертификат на IP не заменяет сертификат на DNS-имя.
+По этому имени доступны и инференс, и админка: `/v1` и `/v1/*` идут в LiteLLM без ограничений по адресу, всё остальное — тоже в LiteLLM, но через `allow`/`deny` из `ADMIN_ALLOW_CIDR`.
+
+Цена решения, которую нужно понимать: инференс и управление делят origin и cookies, поэтому развести их разными политиками firewall уже нельзя — остаётся только ограничение по адресу внутри одного `server`. Если управление должно быть доступно строго уже, чем API, заводите второе имя.
+
+Для локального CA имя должно разрешаться внутренним DNS или hosts. Для external-режима сертификат должен покрывать это имя. Сертификат на IP не заменяет сертификат на DNS-имя.
 
 ### Выбор имён для прода
 
-`api.vlm.local` и `chat.vlm.local` — значения для лаборатории. Для постоянной эксплуатации замените их на поддомены домена, которым вы владеете, например `api.llm.example.com`.
+`vlm.rpa.local` и `vlm.rpa.local` — значения для лаборатории. Для постоянной эксплуатации замените их на поддомены домена, которым вы владеете, например `api.llm.example.com`.
 
 Суффикс `.local` **зарезервирован под mDNS** (RFC 6762). На системах с Avahi/Bonjour резолвер может перехватывать такие имена и не отдавать их обычному DNS, из-за чего часть клиентов будет ходить не туда или не резолвить вовсе. Публичный CA сертификат на `.local` не выпустит в принципе.
 
@@ -47,17 +53,6 @@ Compose публикует nginx на `${PUBLIC_BIND_ADDRESS:-0.0.0.0}:${PUBLIC_
 - `gateway external` с сертификатом корпоративного или публичного CA — клиентам не нужно ничего устанавливать, если этот CA уже в их trust store. Для доменных машин это обычно так.
 
 Поэтому связка «имена в корпоративном DNS + сертификат корпоративного CA» — единственный вариант, при котором подключение нового сервера-клиента не требует никаких действий на нём самом.
-
-### Fallback: одно имя с path routing
-
-Если на площадке нельзя создать две DNS-записи, используйте [nginx/templates/gateway.single.conf.template](../nginx/templates/gateway.single.conf.template): одно имя `PUBLIC_API_HOST`, где `/v1/*` идёт в LiteLLM, а остальные пути — в Open WebUI.
-
-```bash
-NGINX_CONFIG_FILE=./nginx/templates/gateway.single.conf.template \
-  docker compose --profile gateway up -d nginx
-```
-
-Это осознанный компромисс, а не рекомендуемый вариант. Что теряется: общие cookies и origin у API и UI, невозможность применить разные firewall/access policies к машинным клиентам и браузерам, привязка WebUI к особенностям API paths. `PUBLIC_CHAT_HOST` в этом режиме не используется. Команда `./model.sh gateway` этот режим не переключает — он задаётся только через `NGINX_CONFIG_FILE`.
 
 ## Режимы gateway
 
@@ -154,7 +149,7 @@ sudo chmod 0640 secrets/tls/server.key
 Проверить с клиента и подготовить rollback:
 
 ```bash
-curl -fsS https://api.vlm.local/v1/models -H "Authorization: Bearer $CLIENT_VIRTUAL_KEY"
+curl -fsS https://vlm.rpa.local/v1/models -H "Authorization: Bearer $CLIENT_VIRTUAL_KEY"
 # откат при ошибке
 ./model.sh gateway internal
 ```
@@ -164,7 +159,7 @@ curl -fsS https://api.vlm.local/v1/models -H "Authorization: Bearer $CLIENT_VIRT
 Главный риск — часть клиентов идёт на старые имена, часть на новые, а один из наборов уже не обслуживается. Поэтому нужен параллельный режим `migration`, где nginx на одном 443 обслуживает обе пары имён и различает их по SNI.
 
 1. За 24–48 часов снизьте TTL старых имён.
-2. Запишите старые имена в `OLD_PUBLIC_API_HOST`/`OLD_PUBLIC_CHAT_HOST`, новые — в `PUBLIC_API_HOST`/`PUBLIC_CHAT_HOST`. Пустые `OLD_PUBLIC_*` делают migration-конфигурацию некорректной, и скрипт откажется её запускать.
+2. Запишите прежнее полное имя вместе с его зоной в `OLD_PUBLIC_HOST`, а новое — в `PUBLIC_HOST` и `DNS_ZONE`. Пустой `OLD_PUBLIC_HOST` делает migration-конфигурацию некорректной, и скрипт откажется её запускать.
 3. Положите внешний certificate/key pair в `TLS_CERTS_DIR`; сертификат должен покрывать **новые** имена.
 4. Выполните `./model.sh gateway migration`.
 5. Проверьте оба набора: старые имена — с internal trust, новые — с внешней цепочкой. Новый IP проверяется принудительно, без правки клиентского DNS:
@@ -175,7 +170,7 @@ curl -fsS https://api.vlm.local/v1/models -H "Authorization: Bearer $CLIENT_VIRT
      https://api.example.com/v1/models
    ```
 
-6. Обновите API base URLs у клиентов, настройки Open WebUI/OAuth/CORS и предупредите пользователей: browser cookies и сессии между hostnames не переносятся, потребуется повторный вход.
+6. Обновите API base URLs у клиентов и предупредите тех, кто пользуется админкой: cookies сессии между именами не переносятся, потребуется повторный вход.
 7. Наблюдайте оба набора имён не меньше старого TTL плюс запас.
 8. Выполните `./model.sh gateway external`, когда трафик на старые имена прекратился.
 9. Удалите старые DNS/hosts-записи и только после этого — internal root CA из trust stores клиентов.
@@ -222,10 +217,10 @@ nmap -Pn -p 22,80,443,3000,3001,4000,8001,8002,9090,12345 <server-ip>
 ## Фактическая маршрутизация
 
 - API-host пропускает только `/v1` и `/v1/*` в LiteLLM; остальные пути, включая `/key/generate` и LiteLLM UI, получают `404`. Точные правила — `location = /v1` и `location ^~ /v1/`: обычный префиксный `location /v1` пропускал бы наружу и `/v1beta`, и `/v1-internal`;
-- chat-host целиком проксируется в Open WebUI, включая websocket-соединение через `Upgrade`/`Connection`;
+- административные пути проксируются в тот же LiteLLM, но внутри `location /` с `allow`/`deny` из `ADMIN_ALLOW_CIDR`; заголовки `Upgrade`/`Connection` пробрасываются;
 - `proxy_buffering off` и `proxy_request_buffering off` обеспечивают потоковую выдачу токенов; без первого весь ответ копится в буфере и приходит одним куском в конце генерации;
 - `proxy_connect_timeout` равен 10 секундам, остальные proxy timeouts — 10 минут;
-- имена апстримов резолвятся на каждый запрос через `resolver 127.0.0.11`, поэтому пересоздание LiteLLM или Open WebUI не требует перезагрузки шлюза;
+- имена апстримов резолвятся на каждый запрос через `resolver 127.0.0.11`, поэтому пересоздание LiteLLM не требует перезагрузки шлюза;
 - соединения с неизвестным SNI обрываются на рукопожатии через `ssl_reject_handshake`, чужой хост не получит наш сертификат;
 - HTTP redirect отсутствует, nginx слушает HTTPS внутри контейнера на 8443, наружу публикуется 443;
 - контейнер работает под UID 101 в образе `nginx-unprivileged`, read-only, с `cap_drop: ALL` и `no-new-privileges`. Обычный образ nginx потребовал бы `CAP_SETUID`/`CAP_SETGID` для перехода воркеров в непривилегированного пользователя.
@@ -235,8 +230,8 @@ nmap -Pn -p 22,80,443,3000,3001,4000,8001,8002,9090,12345 <server-ip>
 ## Диагностика
 
 ```bash
-openssl s_client -connect api.vlm.local:443 -servername api.vlm.local -showcerts
-curl -v https://api.vlm.local/v1/models
+openssl s_client -connect vlm.rpa.local:443 -servername vlm.rpa.local -showcerts
+curl -v https://vlm.rpa.local/v1/models
 ```
 
 Не добавляйте `-k`. Ошибка должна быть исправлена в DNS, SAN, цепочке или trust store, а не скрыта.

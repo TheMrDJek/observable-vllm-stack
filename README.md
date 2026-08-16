@@ -1,13 +1,12 @@
 # AI vLLM Stack
 
-OpenAI-совместимый стек для локальных vLLM-моделей. Клиентам публикуется один порт `443` с двумя именами: API и чат.
+OpenAI-совместимый стек для локальных vLLM-моделей. Клиентам публикуется один порт `443` с одним именем: по нему доступны и OpenAI-совместимый API, и админка LiteLLM.
 
 ```mermaid
 flowchart LR
   client[Клиент] -->|"HTTPS 443"| nginx[nginx]
-  nginx -->|"api hostname"| litellm[LiteLLM]
-  nginx -->|"chat hostname"| webui[Open WebUI]
-  webui --> litellm
+  nginx -->|"/v1/* — инференс"| litellm[LiteLLM]
+  nginx -->|"остальное — админка"| litellm
   litellm --> vllm[Активный vLLM]
   litellm --> pg[(PostgreSQL)]
   services[Сервисы и Docker] --> alloy[Alloy]
@@ -19,8 +18,7 @@ flowchart LR
 | vLLM | inference-движок, OpenAI-совместимый API | да |
 | LiteLLM | virtual keys, лимиты, учёт, стабильное имя модели | да |
 | PostgreSQL | хранилище ключей и usage LiteLLM | да |
-| nginx | единственный внешний HTTPS-вход на 443, срез админских путей | да для пилота |
-| Open WebUI | чат-интерфейс | нет |
+| nginx | единственный внешний HTTPS-вход на 443, разграничение доступа к админским путям | да для пилота |
 | Alloy + LGTM | метрики, логи, трейсы локально или в удалённый мониторинг | нет |
 | NVIDIA GPU Exporter | GPU-метрики | нет |
 
@@ -49,7 +47,7 @@ Ubuntu:
 ```bash
 cp .env.example .env
 chmod 600 .env
-# замените все CHANGE_ME; OPEN_WEBUI_LITELLM_KEY оставьте пустым
+# замените все CHANGE_ME, включая LITELLM_UI_PASSWORD
 ./model.sh preflight
 ./model.sh observability local
 ./model.sh start main --gpu-metrics
@@ -61,7 +59,7 @@ Windows:
 
 ```powershell
 Copy-Item .env.example .env
-# замените все CHANGE_ME; OPEN_WEBUI_LITELLM_KEY оставьте пустым
+# замените все CHANGE_ME, включая LITELLM_UI_PASSWORD
 .\model.ps1 preflight
 .\model.ps1 observability local
 .\model.ps1 start main -GpuMetrics
@@ -69,7 +67,7 @@ Copy-Item .env.example .env
 .\model.ps1 status
 ```
 
-> **`observability local` — это первый шаг развёртывания, а не опция.** Помимо Prometheus/Loki/Tempo/Grafana команда поднимает PostgreSQL, LiteLLM, Open WebUI и Alloy. Пропустить её нельзя: в режиме `remote` вместо неё выполняется `observability remote`.
+> **`observability local` — это первый шаг развёртывания, а не опция.** Помимо Prometheus/Loki/Tempo/Grafana команда поднимает PostgreSQL, LiteLLM и Alloy. Пропустить её нельзя: в режиме `remote` вместо неё выполняется `observability remote`.
 
 **Первый запуск модели занимает 10–30 минут**: качается ~4 GiB весов, затем модель грузится в VRAM. Состояние `health: starting` в это время нормально. Следите за прогрессом:
 
@@ -77,7 +75,7 @@ Copy-Item .env.example .env
 docker compose --profile main logs -f vllm-main
 ```
 
-После старта LiteLLM создайте ограниченный virtual key для Open WebUI, запишите в `OPEN_WEBUI_LITELLM_KEY` и пересоздайте только `open-webui`. Master key в WebUI не передавайте. Подробности — в инструкциях установки и [ИБ-чеклисте](docs/security-checklist.md).
+После старта LiteLLM выдайте каждому клиенту отдельный virtual key с allowlist моделей и бюджетом. Master key клиентам не передавайте: им управляется весь стек. Подробности — в инструкциях установки и [ИБ-чеклисте](docs/security-checklist.md).
 
 Сертификаты заказчика кладите по образцу [secrets.example/tls](secrets.example/tls/README.md). Каталог `secrets/` в Git не хранится. В режиме `gateway internal` туда же выпускается локальный CA: корневой сертификат для клиентов — `secrets/tls/internal-ca.crt`.
 
@@ -127,7 +125,7 @@ PowerShell — те же команды в `.\model.ps1`, флаг `-GpuMetrics`
 | `observability off` | весь стек без телеметрии | endpoints мониторинга ещё неизвестны |
 | `gateway internal` | nginx с сертификатом локального CA | пилот, быстрый старт |
 | `gateway migration` | старые имена на internal CA, новые на внешнем сертификате | окно смены DNS |
-| `gateway external` | сертификат заказчика на обоих именах | постоянная эксплуатация |
+| `gateway external` | сертификат заказчика на публичном имени | постоянная эксплуатация |
 
 ## Важные ограничения
 
@@ -136,4 +134,4 @@ PowerShell — те же команды в `.\model.ps1`, флаг `-GpuMetrics`
 - Образ vLLM закреплён релизным тегом, модель — неизменяемым commit'ом. Обновляйте по одному фактору за раз: образ **или** модель, никогда оба сразу.
 - Развёртывание, firewall, DNS, trust stores и приёмку выполняет оператор по [docs/verification.md](docs/verification.md).
 - `LITELLM_SALT_KEY` после первого запуска не меняйте.
-- Не используйте `docker compose down -v`, если нужны данные: это удалит ключи, чаты, телеметрию и приватный ключ internal CA.
+- Не используйте `docker compose down -v`, если нужны данные: это удалит ключи LiteLLM, учёт и телеметрию.

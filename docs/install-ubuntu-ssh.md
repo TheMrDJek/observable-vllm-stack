@@ -9,7 +9,7 @@
 - актуальный NVIDIA Driver на хосте;
 - Docker Engine, Compose plugin и NVIDIA Container Toolkit;
 - SSH-доступ пользователя с `sudo`;
-- два DNS-имени из `PUBLIC_API_HOST` и `PUBLIC_CHAT_HOST` (`api.vlm.local` и `chat.vlm.local` по умолчанию);
+- одна DNS-запись на имя из `PUBLIC_HOST` и `DNS_ZONE` (`vlm.rpa.local` по умолчанию);
 - свободный TCP/443; этот стек не слушает TCP/80 и не выполняет ACME.
 
 Ресурсы:
@@ -137,7 +137,6 @@ chmod 700 secrets secrets/tls secrets/remote-ca
 echo "sk-$(openssl rand -hex 24)"   # LITELLM_MASTER_KEY
 echo "sk-$(openssl rand -hex 24)"   # LITELLM_SALT_KEY
 echo "sk-$(openssl rand -hex 24)"   # VLLM_API_KEY
-openssl rand -hex 32                # WEBUI_SECRET_KEY (ровно 64 hex-символа)
 openssl rand -base64 24             # POSTGRES_PASSWORD
 openssl rand -base64 24             # GRAFANA_ADMIN_PASSWORD
 grep -n CHANGE_ME .env              # должно быть пусто перед запуском
@@ -147,7 +146,7 @@ grep -n CHANGE_ME .env              # должно быть пусто пере�
 
 - `LITELLM_MASTER_KEY` и `LITELLM_SALT_KEY` начинаются с `sk-`;
 - `LITELLM_SALT_KEY` после первого запуска не меняется — сохраните его отдельно;
-- `OPEN_WEBUI_LITELLM_KEY` при первом запуске остаётся **пустым**; это не placeholder;
+- `LITELLM_UI_PASSWORD` задаётся обязательно: при пустом значении вход в админку идёт по master-ключу;
 - каждое значение уникально, ключи не переиспользуются между сервисами;
 - `HF_TOKEN` задаётся только для gated-моделей и с минимальными правами.
 
@@ -158,7 +157,7 @@ grep -n CHANGE_ME .env              # должно быть пусто пере�
 До запуска подтвердите:
 
 1. наружу публикуется только gateway на `443/tcp`;
-2. LiteLLM, Open WebUI, Grafana, Prometheus, Loki, Tempo, Alloy, PostgreSQL и vLLM доступны только через loopback или внутренние Docker networks;
+2. Grafana, Prometheus, Loki, Tempo, Alloy, PostgreSQL и vLLM доступны только через loopback или внутренние Docker networks; LiteLLM публикуется наружу через шлюз, причём административные пути ограничены `ADMIN_ALLOW_CIDR`;
 3. SSH ограничен доверенными адресами/VPN и вход по паролю выключен;
 4. клиент не может обойти LiteLLM и обратиться к vLLM напрямую;
 5. резервные копии и retention согласованы со значением `STORE_PROMPTS_IN_SPEND_LOGS` (`false` по умолчанию);
@@ -171,7 +170,7 @@ grep -n CHANGE_ME .env              # должно быть пусто пере�
 docker compose config
 ```
 
-Если в опубликованных адресах видны `0.0.0.0:3000`, `:4000`, `:8001`, `:8002`, `:9090`, `:12345` или порт базы — gate не пройден.
+Если в опубликованных адресах видны `0.0.0.0:4000`, `:8001`, `:8002`, `:9090`, `:12345` или порт базы — gate не пройден. Наружу публикуется только 443.
 
 ## 5. UFW
 
@@ -202,7 +201,7 @@ chmod +x ./model.sh
 
 `preflight` проверяет то, что чаще всего ломает первый запуск: Docker и Compose v2, отсутствие `CHANGE_ME`, GPU из контейнера, свободный диск, занятость публичного порта и разрешение обоих hostnames. Он ничего не чинит автоматически — только сообщает. Расшифровка отказов — в [troubleshooting.md](troubleshooting.md).
 
-`observability local` поднимает не только Prometheus/Loki/Tempo/Grafana, но и PostgreSQL, LiteLLM, Open WebUI и Alloy. Это первый шаг развёртывания, а не опция. Для стенда с удалённым мониторингом вместо неё выполняется `./model.sh observability remote`.
+`observability local` поднимает не только Prometheus/Loki/Tempo/Grafana, но и PostgreSQL, LiteLLM и Alloy. Это первый шаг развёртывания, а не опция. Для стенда с удалённым мониторингом вместо неё выполняется `./model.sh observability remote`.
 
 **Первый запуск модели занимает 10–30 минут.** Скачивается около 4 GiB весов в `data/huggingface`, затем модель грузится в VRAM. В это время контейнер находится в состоянии `health: starting` — это нормально, а не отказ. Для vLLM в Compose задан `start_period: 15m` именно поэтому. Следите за прогрессом:
 
@@ -224,7 +223,7 @@ openssl x509 -in secrets/tls/internal-ca.crt -noout -subject -dates -fingerprint
 
 Запуск модели происходит в фоне. Готовность подтверждайте health/status и логами конкретного vLLM-сервиса, а не только состоянием `running`.
 
-## 7. Ключ Open WebUI
+## 7. Virtual key для клиентов
 
 Публичный nginx route API пропускает только `/v1` и не открывает административный `/key/generate`. Создайте virtual key через loopback LiteLLM после его запуска:
 
@@ -233,16 +232,12 @@ read -rsp "LiteLLM master key: " LITELLM_MASTER_KEY; echo
 curl --fail --show-error --silent \
   -H "Authorization: Bearer ${LITELLM_MASTER_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"key_alias":"open-webui","models":["qwen3.5-4b-awq","qwen3-4b-awq"]}' \
+  -d '{"key_alias":"client-app","models":["qwen3.5-4b-awq"],"max_budget":100}' \
   http://127.0.0.1:4000/key/generate
 unset LITELLM_MASTER_KEY
 ```
 
-Скопируйте поле `key` из ответа в `OPEN_WEBUI_LITELLM_KEY` файла `.env`, затем пересоздайте только UI:
-
-```bash
-docker compose up -d --force-recreate open-webui
-```
+Ключ из поля `key` выдайте клиенту. Master-ключ не выдавайте никому: им управляется весь стек.
 
 Не записывайте master key вместо virtual key и не публикуйте ответ команды.
 
@@ -250,8 +245,8 @@ docker compose up -d --force-recreate open-webui
 
 Полный набор команд приёмки с ожидаемыми результатами — в [verification.md](verification.md). Минимальный критерий готовности:
 
-- `https://api.vlm.local/v1/models` отвечает только с корректным bearer token;
-- `https://chat.vlm.local` открывает Open WebUI;
+- `https://vlm.rpa.local/v1/models` отвечает только с корректным bearer token;
+- `https://vlm.rpa.local/ui` открывает админку LiteLLM, если адрес попадает в `ADMIN_ALLOW_CIDR`;
 - сертификат доверен клиентом без `curl -k`;
 - HTTP и все внутренние порты недоступны из клиентской сети;
 - после перезагрузки хоста стек возвращается в ожидаемое состояние;
@@ -264,7 +259,7 @@ docker compose up -d --force-recreate open-webui
 ./model.sh status
 ```
 
-Никогда не используйте `docker compose down -v` в штатной остановке: это удаляет данные LiteLLM, чаты Open WebUI, телеметрию и приватный ключ internal CA.
+Никогда не используйте `docker compose down -v` в штатной остановке: это удаляет ключи и учёт LiteLLM вместе с телеметрией. Приватный ключ локального CA лежит в `secrets/tls/` и volume не затрагивается, но и его потеря означает переустановку root CA у клиентов.
 
 Если что-то не работает — [troubleshooting.md](troubleshooting.md).
 

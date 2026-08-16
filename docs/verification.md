@@ -14,7 +14,6 @@
 |---|---|---|
 | `LITELLM_MASTER_KEY` | админский ключ LiteLLM | из `.env`; только с хоста через loopback |
 | `CLIENT_VIRTUAL_KEY` | ограниченный virtual key для проверок API | создаётся в §3 |
-| `OPEN_WEBUI_LITELLM_KEY` | virtual key, который прописан в `.env` для UI | создаётся в §3 |
 
 ```bash
 export CLIENT_VIRTUAL_KEY='sk-...'   # не сохраняйте в shell history
@@ -42,15 +41,14 @@ docker compose --env-file .env --profile main --profile gateway config >/dev/nul
 # что и боевой сервис, поэтому проверка ловит не только синтаксис, но и
 # нечитаемые сертификаты. tmpfs на conf.d обязателен: туда entrypoint
 # рендерит шаблоны, а сам /etc/nginx в образе только для чтения.
-for mode in internal single external migration; do
+for mode in internal external migration; do
   docker run --rm --user 101:101 \
     --tmpfs /etc/nginx/conf.d:mode=1777 --tmpfs /tmp:mode=1777 \
-    -e PUBLIC_API_HOST -e PUBLIC_CHAT_HOST \
-    -e OLD_PUBLIC_API_HOST -e OLD_PUBLIC_CHAT_HOST \
+    -e PUBLIC_HOST -e DNS_ZONE -e OLD_PUBLIC_HOST -e ADMIN_ALLOW_CIDR \
     -e TLS_CERT_FILE -e TLS_KEY_FILE \
     -e TLS_INTERNAL_CERT_FILE -e TLS_INTERNAL_KEY_FILE \
     -e NGINX_CLIENT_MAX_BODY_SIZE \
-    -e 'NGINX_ENVSUBST_FILTER=^(PUBLIC_|OLD_PUBLIC_|TLS_|NGINX_CLIENT_)' \
+    -e 'NGINX_ENVSUBST_FILTER=^(PUBLIC_|OLD_PUBLIC_|TLS_|NGINX_CLIENT_|DNS_ZONE|ADMIN_)' \
     -v "$PWD/nginx/templates/common.conf.template:/etc/nginx/templates/00-common.conf.template:ro" \
     -v "$PWD/nginx/templates/gateway.$mode.conf.template:/etc/nginx/templates/10-gateway.conf.template:ro" \
     -v "$PWD/nginx/routes:/etc/nginx/routes:ro" \
@@ -81,9 +79,9 @@ docker compose --profile main logs --tail=100 vllm-main
 
 - `nvidia-smi` видит GPU;
 - `vllm-main` eventually healthy;
-- `litellm`, `open-webui`, `nginx`, `alloy` запущены.
+- `litellm`, `nginx`, `alloy` запущены.
 
-## 3. Virtual key для Open WebUI
+## 3. Virtual key для клиентов
 
 Админский эндпоинт доступен только на loopback: публичный route в nginx его не пропускает. Выполняйте команду **на самом хосте**. С рабочей машины предварительно поднимите tunnel: `ssh -L 4000:127.0.0.1:4000 <user>@<server>`.
 
@@ -91,14 +89,10 @@ docker compose --profile main logs --tail=100 vllm-main
 curl -fsS http://127.0.0.1:4000/key/generate \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"key_alias":"open-webui","models":["qwen3.5-4b-awq","qwen3-4b-awq"],"max_budget":100}'
+  -d '{"key_alias":"client-app","models":["qwen3.5-4b-awq"],"max_budget":100}'
 ```
 
-Запишите поле `key` из ответа в `OPEN_WEBUI_LITELLM_KEY`, затем пересоздайте только UI:
-
-```bash
-docker compose up -d --force-recreate open-webui
-```
+Ключ из поля `key` выдайте клиенту. Master-ключ не выдаётся никому: им управляется весь стек.
 
 Отдельным ключом создайте `CLIENT_VIRTUAL_KEY` для проверок API ниже — не переиспользуйте ключ UI:
 
@@ -119,10 +113,10 @@ openssl x509 -in secrets/tls/internal-ca.crt -noout -subject -issuer -dates -fin
 openssl x509 -in secrets/tls/internal.crt -noout -ext subjectAltName -dates
 
 # API host
-curl -fsS --cacert secrets/tls/internal-ca.crt https://api.vlm.local/v1/models \
+curl -fsS --cacert secrets/tls/internal-ca.crt https://vlm.rpa.local/v1/models \
   -H "Authorization: Bearer $CLIENT_VIRTUAL_KEY"
 
-# неизвестный Host должен получить отказ/пустой сайт, не Open WebUI
+# неизвестный SNI должен обрываться на рукопожатии, а не отдавать сертификат
 curl -vk --resolve evil.example:443:<server-ip> https://evil.example/ || true
 
 # порт 80 закрыт
@@ -136,14 +130,14 @@ nc -zv <server-ip> 80 || true
 ```bash
 # обычный chat
 curl -fsS --cacert secrets/tls/internal-ca.crt \
-  https://api.vlm.local/v1/chat/completions \
+  https://vlm.rpa.local/v1/chat/completions \
   -H "Authorization: Bearer $CLIENT_VIRTUAL_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"qwen3.5-4b-awq","messages":[{"role":"user","content":"Ответь одним словом: работает?"}]}'
 
 # streaming
 curl -N --cacert secrets/tls/internal-ca.crt \
-  https://api.vlm.local/v1/chat/completions \
+  https://vlm.rpa.local/v1/chat/completions \
   -H "Authorization: Bearer $CLIENT_VIRTUAL_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"qwen3.5-4b-awq","stream":true,"messages":[{"role":"user","content":"Считай до трёх"}]}'
@@ -159,7 +153,7 @@ curl -N --cacert secrets/tls/internal-ca.crt \
 ```bash
 ./model.sh stop
 ./model.sh start alt --gpu-metrics
-curl -fsS --cacert secrets/tls/internal-ca.crt https://api.vlm.local/v1/models \
+curl -fsS --cacert secrets/tls/internal-ca.crt https://vlm.rpa.local/v1/models \
   -H "Authorization: Bearer $CLIENT_VIRTUAL_KEY"
 
 # concurrent только на подходящем GPU-стенде
@@ -179,7 +173,7 @@ curl -fsS --cacert secrets/tls/internal-ca.crt https://api.vlm.local/v1/models \
 # закрыть старые DNS/hosts после cutover
 ```
 
-Ожидание: client base URL при смене только сертификата не меняется; при смене DNS cookies Open WebUI не переносятся.
+Ожидание: client base URL при смене только сертификата не меняется; при смене имени cookies сессии админки не переносятся.
 
 ## 8. Observability
 
