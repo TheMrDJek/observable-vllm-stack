@@ -14,16 +14,16 @@
 resolver 127.0.0.11 valid=10s ipv6=off;
 resolver_timeout 5s;
 
-# Проброс websocket-соединений Open WebUI. Значение 'close' на пустом Upgrade
-# не даёт отправить в upstream висячий заголовок Connection: upgrade.
+# Проброс websocket-соединений. Значение 'close' на пустом Upgrade не даёт
+# отправить в upstream висячий заголовок Connection: upgrade.
 map $http_upgrade $connection_upgrade {
 	default upgrade;
 	''      close;
 }
 
 # 0 = без ограничения, как было у Caddy. Значение вроде 64m ограничивает
-# размер запроса к /v1 и загрузок в Open WebUI; менять осознанно, слишком
-# низкий предел ломает мультимодальные запросы с картинками.
+# размер запроса к /v1; менять осознанно — слишком низкий предел ломает
+# мультимодальные запросы с картинками в base64.
 client_max_body_size ${NGINX_CLIENT_MAX_BODY_SIZE};
 
 server_tokens off;

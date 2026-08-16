@@ -1,51 +1,42 @@
-# Режим 'migration': на одном порту 443 параллельно обслуживаются старые и
-# новые имена, nginx различает их по SNI. Старые остаются на локальном CA,
-# новые уже используют внешний сертификат. Нужен на время окна смены DNS,
-# пока часть клиентов ходит на прежние имена.
+# Режим 'migration': на одном порту 443 параллельно обслуживаются прежнее имя и
+# новое, nginx различает их по SNI. Прежнее остаётся на локальном CA, новое уже
+# использует внешний сертификат. Нужен на время окна смены DNS, пока часть
+# клиентов ходит на старый адрес.
 #
-# Пустые OLD_PUBLIC_* дадут 'server_name ;' и провал nginx -t, поэтому скрипт
-# проверяет их заполненность до валидации.
+# OLD_PUBLIC_HOST задаётся полным именем вместе с зоной: при переезде меняется
+# не только имя хоста, но зачастую и сама зона. Пустое значение даёт
+# 'server_name ;' и провал nginx -t, поэтому скрипт проверяет его заполненность.
 
 server {
 	listen 8443 ssl;
 	http2 on;
-	server_name ${OLD_PUBLIC_API_HOST};
+	server_name ${OLD_PUBLIC_HOST};
 
 	ssl_certificate     /etc/nginx/certs/${TLS_INTERNAL_CERT_FILE};
 	ssl_certificate_key /etc/nginx/certs/${TLS_INTERNAL_KEY_FILE};
 
 	include /etc/nginx/routes/api.conf;
+
+	location / {
+		allow ${ADMIN_ALLOW_CIDR};
+		deny all;
+		include /etc/nginx/routes/admin.conf;
+	}
 }
 
 server {
 	listen 8443 ssl;
 	http2 on;
-	server_name ${OLD_PUBLIC_CHAT_HOST};
-
-	ssl_certificate     /etc/nginx/certs/${TLS_INTERNAL_CERT_FILE};
-	ssl_certificate_key /etc/nginx/certs/${TLS_INTERNAL_KEY_FILE};
-
-	include /etc/nginx/routes/chat.conf;
-}
-
-server {
-	listen 8443 ssl;
-	http2 on;
-	server_name ${PUBLIC_API_HOST};
+	server_name ${PUBLIC_HOST}.${DNS_ZONE};
 
 	ssl_certificate     /etc/nginx/certs/${TLS_CERT_FILE};
 	ssl_certificate_key /etc/nginx/certs/${TLS_KEY_FILE};
 
 	include /etc/nginx/routes/api.conf;
-}
 
-server {
-	listen 8443 ssl;
-	http2 on;
-	server_name ${PUBLIC_CHAT_HOST};
-
-	ssl_certificate     /etc/nginx/certs/${TLS_CERT_FILE};
-	ssl_certificate_key /etc/nginx/certs/${TLS_KEY_FILE};
-
-	include /etc/nginx/routes/chat.conf;
+	location / {
+		allow ${ADMIN_ALLOW_CIDR};
+		deny all;
+		include /etc/nginx/routes/admin.conf;
+	}
 }

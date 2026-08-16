@@ -107,6 +107,13 @@ services:
     environment:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
       LITELLM_SALT_KEY: ${LITELLM_SALT_KEY}
+      # Отдельные учётные данные для админки. Без них LiteLLM пускает в /ui по
+      # имени admin с master-ключом в качестве пароля — то есть ключ, которым
+      # выпускаются и отзываются все остальные ключи, вводится в форму в
+      # браузере и оседает в менеджерах паролей. При одном публичном имени
+      # админка доступна из сети, поэтому пароль обязателен.
+      UI_USERNAME: ${LITELLM_UI_USERNAME:-admin}
+      UI_PASSWORD: ${LITELLM_UI_PASSWORD:-}
       DATABASE_URL: postgresql://${POSTGRES_USER:-litellm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-litellm}
       VLLM_API_KEY: ${VLLM_API_KEY:-local-vllm}
       OTEL_EXPORTER: otlp_grpc
@@ -137,49 +144,6 @@ services:
     logging: *default-logging
     restart: unless-stopped
 
-  open-webui:
-    image: ghcr.io/open-webui/open-webui:${OPEN_WEBUI_VERSION:-v0.11.0}
-    environment:
-      OPENAI_API_BASE_URLS: http://litellm:4000/v1
-      OPENAI_API_KEYS: ${OPEN_WEBUI_LITELLM_KEY:-}
-      ENABLE_OLLAMA_API: "false"
-      ENABLE_OTEL: "true"
-      ENABLE_OTEL_TRACES: "true"
-      ENABLE_OTEL_METRICS: "false"
-      ENABLE_OTEL_LOGS: "false"
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://alloy:4317
-      OTEL_EXPORTER_OTLP_INSECURE: "true"
-      OTEL_TRACES_SAMPLER: parentbased_traceidratio
-      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-1.0}
-      OTEL_SERVICE_NAME: open-webui
-      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}
-      ENABLE_SIGNUP: ${WEBUI_ENABLE_SIGNUP:-false}
-      ENABLE_PERSISTENT_CONFIG: "false"
-    volumes:
-      - open-webui-data:/app/backend/data
-    ports:
-      - "127.0.0.1:${OPEN_WEBUI_PORT:-3000}:8080"
-    networks:
-      - backend
-      - edge
-    # Зависимости от alloy намеренно нет. Экспорт OTLP выполняется по
-    # принципу best-effort с ретраями, поэтому порядок старта ничего не даёт, а
-    # жёсткая зависимость поднимала бы намеренно остановленный Alloy (режим
-    # 'observability off') при следующем 'up -d'.
-    depends_on:
-      litellm:
-        condition: service_healthy
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=3)"
-      interval: 15s
-      timeout: 5s
-      retries: 20
-      start_period: 60s
-    logging: *default-logging
-    restart: unless-stopped
-
   # Образ nginx-unprivileged, а не обычный nginx: там master стартует под root и
   # для перехода воркеров в пользователя nginx требует CAP_SETUID и CAP_SETGID,
   # то есть cap_drop: ALL пришлось бы ослабить. Здесь весь процесс работает под
@@ -190,10 +154,18 @@ services:
     profiles: [gateway]
     user: "101:101"
     environment:
-      PUBLIC_API_HOST: ${PUBLIC_API_HOST}
-      PUBLIC_CHAT_HOST: ${PUBLIC_CHAT_HOST}
-      OLD_PUBLIC_API_HOST: ${OLD_PUBLIC_API_HOST:-}
-      OLD_PUBLIC_CHAT_HOST: ${OLD_PUBLIC_CHAT_HOST:-}
+      # Публичное имя собирается из короткого имени стенда и зоны:
+      # vlm + rpa.local = vlm.rpa.local. Метка зоны разводит развёртывания
+      # разных заказчиков, чтобы они не занимали одинаковые записи в DNS.
+      PUBLIC_HOST: ${PUBLIC_HOST:-vlm}
+      DNS_ZONE: ${DNS_ZONE:-rpa.local}
+      # Полное прежнее имя вместе с зоной: при переезде меняется и она.
+      OLD_PUBLIC_HOST: ${OLD_PUBLIC_HOST:-}
+      # Кто может обращаться к административным путям. 'all' оставлено по
+      # умолчанию, иначе админка не открылась бы с другой машины. Сузьте до
+      # своей подсети, как только адреса известны: за этими путями стоит
+      # управление ключами, лимитами и бюджетами.
+      ADMIN_ALLOW_CIDR: ${ADMIN_ALLOW_CIDR:-all}
       TLS_CERT_FILE: ${TLS_CERT_FILE:-server.crt}
       TLS_KEY_FILE: ${TLS_KEY_FILE:-server.key}
       TLS_INTERNAL_CERT_FILE: ${TLS_INTERNAL_CERT_FILE:-internal.crt}
@@ -203,7 +175,7 @@ services:
       # подставил бы и переменные самого nginx — $host, $scheme,
       # $proxy_add_x_forwarded_for — пустыми строками, и шлюз потерял бы
       # заголовки проксирования, пройдя при этом nginx -t.
-      NGINX_ENVSUBST_FILTER: '^(PUBLIC_|OLD_PUBLIC_|TLS_|NGINX_CLIENT_)'
+      NGINX_ENVSUBST_FILTER: '^(PUBLIC_|OLD_PUBLIC_|TLS_|NGINX_CLIENT_|DNS_ZONE|ADMIN_)'
     volumes:
       - ./nginx/templates/common.conf.template:/etc/nginx/templates/00-common.conf.template:ro
       - ${NGINX_CONFIG_FILE:-./nginx/templates/gateway.internal.conf.template}:/etc/nginx/templates/10-gateway.conf.template:ro
@@ -218,8 +190,6 @@ services:
       - edge
     depends_on:
       litellm:
-        condition: service_healthy
-      open-webui:
         condition: service_healthy
     healthcheck:
       test: [CMD-SHELL, "wget -q -O /dev/null http://127.0.0.1:8081/healthz"]
@@ -386,7 +356,6 @@ networks:
 
 volumes:
   postgres-data:
-  open-webui-data:
   prometheus-data:
   loki-data:
   tempo-data:

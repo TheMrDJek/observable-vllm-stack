@@ -200,6 +200,15 @@ gateway_template() {
     printf '%s\n' "./nginx/templates/gateway.$1.conf.template"
 }
 
+# Публичное имя собирается из короткого имени стенда и зоны, как это делает
+# server_name в шаблонах. Держать их раздельно нужно, чтобы зона менялась одной
+# строкой при переносе в другой проект или к другому заказчику.
+public_fqdn() {
+    printf '%s.%s\n' \
+        "$(env_setting_default PUBLIC_HOST vlm)" \
+        "$(env_setting_default DNS_ZONE rpa.local)"
+}
+
 # У nginx нет аналога директивы 'tls internal' прежнего Caddy, поэтому
 # сертификат локального CA выпускается здесь. Ключ CA переиспользуется, пока
 # файл на месте: его смена обесценила бы trust store всех клиентов.
@@ -210,7 +219,8 @@ ensure_internal_ca() {
     certs_dir="$(resolve_path "$(env_setting_default TLS_CERTS_DIR ./secrets/tls)")"
     mkdir -p "$certs_dir"
 
-    for name in PUBLIC_API_HOST PUBLIC_CHAT_HOST OLD_PUBLIC_API_HOST OLD_PUBLIC_CHAT_HOST; do
+    names+=("$(public_fqdn)")
+    for name in OLD_PUBLIC_HOST; do
         value="$(env_setting "$name")"
         [[ -n "$value" ]] && names+=("$value")
     done
@@ -258,16 +268,16 @@ validate_nginx_config() {
     arguments=(run --rm --user 101:101
         --tmpfs "/etc/nginx/conf.d:mode=1777"
         --tmpfs "/tmp:mode=1777"
-        -e "PUBLIC_API_HOST=$(env_setting PUBLIC_API_HOST)"
-        -e "PUBLIC_CHAT_HOST=$(env_setting PUBLIC_CHAT_HOST)"
-        -e "OLD_PUBLIC_API_HOST=$(env_setting OLD_PUBLIC_API_HOST)"
-        -e "OLD_PUBLIC_CHAT_HOST=$(env_setting OLD_PUBLIC_CHAT_HOST)"
+        -e "PUBLIC_HOST=$(env_setting_default PUBLIC_HOST vlm)"
+        -e "DNS_ZONE=$(env_setting_default DNS_ZONE rpa.local)"
+        -e "OLD_PUBLIC_HOST=$(env_setting OLD_PUBLIC_HOST)"
+        -e "ADMIN_ALLOW_CIDR=$(env_setting_default ADMIN_ALLOW_CIDR all)"
         -e "TLS_CERT_FILE=$(env_setting_default TLS_CERT_FILE server.crt)"
         -e "TLS_KEY_FILE=$(env_setting_default TLS_KEY_FILE server.key)"
         -e "TLS_INTERNAL_CERT_FILE=$(env_setting_default TLS_INTERNAL_CERT_FILE internal.crt)"
         -e "TLS_INTERNAL_KEY_FILE=$(env_setting_default TLS_INTERNAL_KEY_FILE internal.key)"
         -e "NGINX_CLIENT_MAX_BODY_SIZE=$(env_setting_default NGINX_CLIENT_MAX_BODY_SIZE 0)"
-        -e 'NGINX_ENVSUBST_FILTER=^(PUBLIC_|OLD_PUBLIC_|TLS_|NGINX_CLIENT_)'
+        -e 'NGINX_ENVSUBST_FILTER=^(PUBLIC_|OLD_PUBLIC_|TLS_|NGINX_CLIENT_|DNS_ZONE|ADMIN_)'
         -v "$SCRIPT_DIR/nginx/templates/common.conf.template:/etc/nginx/templates/00-common.conf.template:ro"
         -v "$template:/etc/nginx/templates/10-gateway.conf.template:ro"
         -v "$SCRIPT_DIR/nginx/routes:/etc/nginx/routes:ro")
@@ -344,24 +354,28 @@ preflight_port() {
     fi
 }
 
+check_hostname_resolves() {
+    local label="$1" value="$2"
+    if ! command -v getent >/dev/null 2>&1; then
+        check_warn "getent is unavailable; $label=$value was not resolved."
+        return 0
+    fi
+    if getent hosts "$value" >/dev/null 2>&1; then
+        check_ok "$label=$value resolves."
+    else
+        check_warn "$label=$value does not resolve yet. Add DNS or hosts entries before client testing."
+    fi
+}
+
 preflight_hostnames() {
-    local name value
-    for name in PUBLIC_API_HOST PUBLIC_CHAT_HOST; do
-        value="$(env_setting "$name")"
-        if [[ -z "$value" ]]; then
-            check_fail "$name is empty."
-            continue
-        fi
-        if ! command -v getent >/dev/null 2>&1; then
-            check_warn "getent is unavailable; $name=$value was not resolved."
-            continue
-        fi
-        if getent hosts "$value" >/dev/null 2>&1; then
-            check_ok "$name=$value resolves."
-        else
-            check_warn "$name=$value does not resolve yet. Add DNS or hosts entries before client testing."
-        fi
-    done
+    local old
+    check_hostname_resolves "public name" "$(public_fqdn)"
+    # Прежнее имя заполняется только на время окна смены DNS.
+    old="$(env_setting OLD_PUBLIC_HOST)"
+    if [[ -n "$old" ]]; then
+        check_hostname_resolves "OLD_PUBLIC_HOST" "$old"
+    fi
+    return 0
 }
 
 preflight_modes() {
@@ -478,10 +492,7 @@ case "$ACTION" in
                     assert_key_readable_by_nginx
                 fi
                 if [[ "$mode" == "migration" ]]; then
-                    assert_non_empty_setting OLD_PUBLIC_API_HOST
-                    assert_non_empty_setting OLD_PUBLIC_CHAT_HOST
-                    assert_non_empty_setting PUBLIC_API_HOST
-                    assert_non_empty_setting PUBLIC_CHAT_HOST
+                    assert_non_empty_setting OLD_PUBLIC_HOST
                 fi
                 template="$(gateway_template "$mode")"
                 [[ -f "$SCRIPT_DIR/${template#./}" ]] ||

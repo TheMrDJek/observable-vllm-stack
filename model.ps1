@@ -270,6 +270,14 @@ function Get-SettingOrDefault {
     return $value
 }
 
+function Get-PublicFqdn {
+    param([Parameter(Mandatory = $true)][hashtable]$FileSettings)
+
+    $host_ = Get-SettingOrDefault -Name "PUBLIC_HOST" -FileSettings $FileSettings -Default "vlm"
+    $zone = Get-SettingOrDefault -Name "DNS_ZONE" -FileSettings $FileSettings -Default "rpa.local"
+    return "$host_.$zone"
+}
+
 function Get-NginxImage {
     param([Parameter(Mandatory = $true)][hashtable]$FileSettings)
 
@@ -307,11 +315,9 @@ function New-InternalCertificate {
     }
 
     $names = @()
-    foreach ($name in @("PUBLIC_API_HOST", "PUBLIC_CHAT_HOST",
-            "OLD_PUBLIC_API_HOST", "OLD_PUBLIC_CHAT_HOST")) {
-        $value = Get-Setting -Name $name -FileSettings $FileSettings
-        if (-not [string]::IsNullOrWhiteSpace($value)) { $names += $value }
-    }
+    $names += (Get-PublicFqdn -FileSettings $FileSettings)
+    $old = Get-Setting -Name "OLD_PUBLIC_HOST" -FileSettings $FileSettings
+    if (-not [string]::IsNullOrWhiteSpace($old)) { $names += $old }
     if ($names.Count -eq 0) {
         throw "No hostnames are set. The internal certificate cannot be issued."
     }
@@ -377,12 +383,12 @@ function Test-NginxConfig {
         "--tmpfs", "/etc/nginx/conf.d:mode=1777",
         "--tmpfs", "/tmp:mode=1777"
     )
-    foreach ($name in @("PUBLIC_API_HOST", "PUBLIC_CHAT_HOST",
-            "OLD_PUBLIC_API_HOST", "OLD_PUBLIC_CHAT_HOST")) {
-        $value = Get-Setting -Name $name -FileSettings $FileSettings
-        if ($null -eq $value) { $value = "" }
-        $arguments += @("-e", "$name=$value")
-    }
+    $arguments += @("-e", "PUBLIC_HOST=$(Get-SettingOrDefault -Name 'PUBLIC_HOST' -FileSettings $FileSettings -Default 'vlm')")
+    $arguments += @("-e", "DNS_ZONE=$(Get-SettingOrDefault -Name 'DNS_ZONE' -FileSettings $FileSettings -Default 'rpa.local')")
+    $old = Get-Setting -Name "OLD_PUBLIC_HOST" -FileSettings $FileSettings
+    if ($null -eq $old) { $old = "" }
+    $arguments += @("-e", "OLD_PUBLIC_HOST=$old")
+    $arguments += @("-e", "ADMIN_ALLOW_CIDR=$(Get-SettingOrDefault -Name 'ADMIN_ALLOW_CIDR' -FileSettings $FileSettings -Default 'all')")
     $defaults = @{
         TLS_CERT_FILE             = "server.crt"
         TLS_KEY_FILE              = "server.key"
@@ -394,7 +400,7 @@ function Test-NginxConfig {
         $value = Get-SettingOrDefault -Name $name -FileSettings $FileSettings -Default $defaults[$name]
         $arguments += @("-e", "$name=$value")
     }
-    $arguments += @("-e", 'NGINX_ENVSUBST_FILTER=^(PUBLIC_|OLD_PUBLIC_|TLS_|NGINX_CLIENT_)')
+    $arguments += @("-e", 'NGINX_ENVSUBST_FILTER=^(PUBLIC_|OLD_PUBLIC_|TLS_|NGINX_CLIENT_|DNS_ZONE|ADMIN_)')
     $arguments += @("-v", "$(Join-Path $PSScriptRoot 'nginx\templates\common.conf.template'):/etc/nginx/templates/00-common.conf.template:ro")
     $arguments += @("-v", "$(Join-Path $PSScriptRoot "nginx\templates\gateway.$Mode.conf.template"):/etc/nginx/templates/10-gateway.conf.template:ro")
     $arguments += @("-v", "$(Join-Path $PSScriptRoot 'nginx\routes'):/etc/nginx/routes:ro")
@@ -488,18 +494,19 @@ function Test-PreflightPort {
 function Test-PreflightHostnames {
     param([Parameter(Mandatory = $true)][hashtable]$FileSettings)
 
-    foreach ($name in @("PUBLIC_API_HOST", "PUBLIC_CHAT_HOST")) {
-        $value = Get-Setting -Name $name -FileSettings $FileSettings
-        if ([string]::IsNullOrWhiteSpace($value)) {
-            Write-CheckFail "$name is empty."
-            continue
-        }
+    $names = @{ "public name" = (Get-PublicFqdn -FileSettings $FileSettings) }
+    # Прежнее имя заполняется только на время окна смены DNS.
+    $old = Get-Setting -Name "OLD_PUBLIC_HOST" -FileSettings $FileSettings
+    if (-not [string]::IsNullOrWhiteSpace($old)) { $names["OLD_PUBLIC_HOST"] = $old }
+
+    foreach ($label in $names.Keys) {
+        $value = $names[$label]
         try {
             [void][Net.Dns]::GetHostAddresses($value)
-            Write-CheckOk "$name=$value resolves."
+            Write-CheckOk "$label=$value resolves."
         }
         catch {
-            Write-CheckWarn "$name=$value does not resolve yet. Add DNS or hosts entries before client testing."
+            Write-CheckWarn "$label=$value does not resolve yet. Add DNS or hosts entries before client testing."
         }
     }
 }
@@ -642,9 +649,7 @@ try {
                 Assert-KeyReadableByNginx -FileSettings $fileSettings
             }
             if ($mode -eq "migration") {
-                foreach ($name in @("OLD_PUBLIC_API_HOST", "OLD_PUBLIC_CHAT_HOST", "PUBLIC_API_HOST", "PUBLIC_CHAT_HOST")) {
-                    Assert-NonEmptySetting -Name $name -FileSettings $fileSettings
-                }
+                Assert-NonEmptySetting -Name "OLD_PUBLIC_HOST" -FileSettings $fileSettings
             }
             $template = Get-GatewayTemplate -Mode $mode
             $configPath = Join-Path $PSScriptRoot "nginx\templates\gateway.$mode.conf.template"
