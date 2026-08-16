@@ -125,7 +125,7 @@ has_compose_profile() {
 
 assert_tls_files() {
     local directory name file_name path
-    directory="$(env_setting TLS_CERTS_DIR)"
+    directory="$(env_setting_default TLS_CERTS_DIR ./secrets/tls)"
     [[ -n "$directory" ]] || fail "Missing required setting TLS_CERTS_DIR."
     if [[ "$directory" != /* && ! "$directory" =~ ^[A-Za-z]:[\\/].* ]]; then
         directory="$SCRIPT_DIR/$directory"
@@ -183,32 +183,112 @@ resolve_path() {
     printf '%s\n' "$path"
 }
 
-validate_caddyfile() {
-    local mode="$1" version certs_dir arguments=()
-    version="$(env_setting CADDY_VERSION)"
-    certs_dir="$(resolve_path "$(env_setting TLS_CERTS_DIR)")"
+# Повторяет значения по умолчанию из compose.yaml. Валидация обязана видеть ту
+# же конфигурацию, что и запуск, иначе .env без новых ключей прошёл бы nginx -t
+# с пустыми путями к сертификату и упал уже на старте контейнера.
+env_setting_default() {
+    local value
+    value="$(env_setting "$1")"
+    printf '%s\n' "${value:-$2}"
+}
 
-    # Монтируем ту же раскладку, что использует compose. Если смонтировать весь
-    # каталог caddy как read-only, вложенную точку /etc/caddy/certs создать
-    # невозможно, и docker завершится с ошибкой ещё до разбора конфигурации Caddy.
+nginx_image() {
+    printf 'nginxinc/nginx-unprivileged:%s\n' "$(env_setting_default NGINX_VERSION 1.29-alpine)"
+}
+
+gateway_template() {
+    printf '%s\n' "./nginx/templates/gateway.$1.conf.template"
+}
+
+# Публичное имя собирается из короткого имени стенда и зоны, как это делает
+# server_name в шаблонах. Держать их раздельно нужно, чтобы зона менялась одной
+# строкой при переносе в другой проект или к другому заказчику.
+public_fqdn() {
+    printf '%s.%s\n' \
+        "$(env_setting_default PUBLIC_HOST vlm)" \
+        "$(env_setting_default DNS_ZONE rpa.local)"
+}
+
+# У nginx нет аналога директивы 'tls internal' прежнего Caddy, поэтому
+# сертификат локального CA выпускается здесь. Ключ CA переиспользуется, пока
+# файл на месте: его смена обесценила бы trust store всех клиентов.
+# Leaf покрывает все заполненные имена сразу, включая OLD_PUBLIC_*, — тогда
+# переключение internal -> migration не требует отдельного выпуска.
+ensure_internal_ca() {
+    local certs_dir names=() name value openssl_version arguments=()
+    certs_dir="$(resolve_path "$(env_setting_default TLS_CERTS_DIR ./secrets/tls)")"
+    mkdir -p "$certs_dir"
+
+    names+=("$(public_fqdn)")
+    for name in OLD_PUBLIC_HOST; do
+        value="$(env_setting "$name")"
+        [[ -n "$value" ]] && names+=("$value")
+    done
+    (( ${#names[@]} > 0 )) ||
+        fail "No hostnames are set. The internal certificate cannot be issued."
+
+    openssl_version="$(env_setting_default OPENSSL_VERSION 3.5.4)"
     arguments=(run --rm
-        -e "PUBLIC_API_HOST=$(env_setting PUBLIC_API_HOST)"
-        -e "PUBLIC_CHAT_HOST=$(env_setting PUBLIC_CHAT_HOST)"
-        -e "OLD_PUBLIC_API_HOST=$(env_setting OLD_PUBLIC_API_HOST)"
-        -e "OLD_PUBLIC_CHAT_HOST=$(env_setting OLD_PUBLIC_CHAT_HOST)"
-        -e "TLS_CERT_FILE=$(env_setting TLS_CERT_FILE)"
-        -e "TLS_KEY_FILE=$(env_setting TLS_KEY_FILE)"
-        -v "$SCRIPT_DIR/caddy/Caddyfile.$mode:/etc/caddy/Caddyfile:ro"
-        -v "$SCRIPT_DIR/caddy/routes.caddy:/etc/caddy/routes.caddy:ro")
-    [[ -d "$certs_dir" ]] && arguments+=(-v "$certs_dir:/etc/caddy/certs:ro")
-    arguments+=("caddy:${version:-2.10.2-alpine}"
-        caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile)
+        -e "SAN_NAMES=${names[*]}"
+        -e "CERT_FILE=$(env_setting_default TLS_INTERNAL_CERT_FILE internal.crt)"
+        -e "KEY_FILE=$(env_setting_default TLS_INTERNAL_KEY_FILE internal.key)"
+        -v "$certs_dir:/certs"
+        -v "$SCRIPT_DIR/nginx/internal-ca.sh:/internal-ca.sh:ro"
+        --entrypoint /bin/sh
+        "alpine/openssl:${openssl_version}" /internal-ca.sh)
+
+    MSYS_NO_PATHCONV=1 docker "${arguments[@]}" ||
+        fail "Issuing the internal certificate failed. The gateway was not changed."
+}
+
+# nginx работает под UID 101 и читает ключ сам. Проверка вынесена отдельно от
+# nginx -t только ради понятного сообщения: иначе оператор получил бы
+# 'cannot load certificate key ... Permission denied' без объяснения причины.
+assert_key_readable_by_nginx() {
+    local certs_dir key_file
+    certs_dir="$(resolve_path "$(env_setting_default TLS_CERTS_DIR ./secrets/tls)")"
+    key_file="$(env_setting TLS_KEY_FILE)"
+    [[ -n "$key_file" ]] || fail "Missing required setting TLS_KEY_FILE."
+
+    MSYS_NO_PATHCONV=1 docker run --rm --user 101:101 \
+        -v "$certs_dir:/certs:ro" --entrypoint /bin/sh "$(nginx_image)" \
+        -c "test -r /certs/$key_file" >/dev/null 2>&1 ||
+        fail "$key_file is not readable by UID 101, under which nginx runs.
+On Linux: sudo chown 0:101 '$certs_dir/$key_file' && sudo chmod 0640 '$certs_dir/$key_file'"
+}
+
+# Прогоняется тот же образ, entrypoint, пользователь и раскладка томов, что и в
+# compose, поэтому проверка ловит не только синтаксис, но и нечитаемые
+# сертификаты. tmpfs на conf.d обязателен: туда entrypoint рендерит шаблоны.
+validate_nginx_config() {
+    local mode="$1" certs_dir template arguments=()
+    certs_dir="$(resolve_path "$(env_setting_default TLS_CERTS_DIR ./secrets/tls)")"
+    template="$SCRIPT_DIR/nginx/templates/gateway.$mode.conf.template"
+
+    arguments=(run --rm --user 101:101
+        --tmpfs "/etc/nginx/conf.d:mode=1777"
+        --tmpfs "/tmp:mode=1777"
+        -e "PUBLIC_HOST=$(env_setting_default PUBLIC_HOST vlm)"
+        -e "DNS_ZONE=$(env_setting_default DNS_ZONE rpa.local)"
+        -e "OLD_PUBLIC_HOST=$(env_setting OLD_PUBLIC_HOST)"
+        -e "ADMIN_ALLOW_CIDR=$(env_setting_default ADMIN_ALLOW_CIDR all)"
+        -e "TLS_CERT_FILE=$(env_setting_default TLS_CERT_FILE server.crt)"
+        -e "TLS_KEY_FILE=$(env_setting_default TLS_KEY_FILE server.key)"
+        -e "TLS_INTERNAL_CERT_FILE=$(env_setting_default TLS_INTERNAL_CERT_FILE internal.crt)"
+        -e "TLS_INTERNAL_KEY_FILE=$(env_setting_default TLS_INTERNAL_KEY_FILE internal.key)"
+        -e "NGINX_CLIENT_MAX_BODY_SIZE=$(env_setting_default NGINX_CLIENT_MAX_BODY_SIZE 0)"
+        -e 'NGINX_ENVSUBST_FILTER=^(PUBLIC_|OLD_PUBLIC_|TLS_|NGINX_CLIENT_|DNS_ZONE|ADMIN_)'
+        -v "$SCRIPT_DIR/nginx/templates/common.conf.template:/etc/nginx/templates/00-common.conf.template:ro"
+        -v "$template:/etc/nginx/templates/10-gateway.conf.template:ro"
+        -v "$SCRIPT_DIR/nginx/routes:/etc/nginx/routes:ro")
+    [[ -d "$certs_dir" ]] && arguments+=(-v "$certs_dir:/etc/nginx/certs:ro")
+    arguments+=("$(nginx_image)" nginx -t)
 
     # MSYS_NO_PATHCONV не даёт Git Bash под Windows переписывать пути внутри
-    # контейнера вроде /etc/caddy/Caddyfile в C:/Program Files/Git/etc/...
+    # контейнера вроде /etc/nginx/conf.d в C:/Program Files/Git/etc/...
     # На Linux переменная не имеет смысла и игнорируется.
     MSYS_NO_PATHCONV=1 docker "${arguments[@]}" >/dev/null ||
-        fail "caddy/Caddyfile.$mode did not pass 'caddy validate'. The gateway was not changed."
+        fail "$(gateway_template "$mode") did not pass 'nginx -t'. The gateway was not changed."
 }
 
 PREFLIGHT_FAILURES=0
@@ -255,8 +335,8 @@ preflight_port() {
     local port listeners
     port="$(env_setting PUBLIC_HTTPS_PORT)"
     port="${port:-443}"
-    if docker compose --profile gateway ps --status running caddy 2>/dev/null | grep -q caddy; then
-        check_ok "Port ${port} is held by this stack's Caddy."
+    if docker compose --profile gateway ps --status running nginx 2>/dev/null | grep -q nginx; then
+        check_ok "Port ${port} is held by this stack's nginx."
         return
     fi
     if command -v ss >/dev/null 2>&1; then
@@ -274,24 +354,28 @@ preflight_port() {
     fi
 }
 
+check_hostname_resolves() {
+    local label="$1" value="$2"
+    if ! command -v getent >/dev/null 2>&1; then
+        check_warn "getent is unavailable; $label=$value was not resolved."
+        return 0
+    fi
+    if getent hosts "$value" >/dev/null 2>&1; then
+        check_ok "$label=$value resolves."
+    else
+        check_warn "$label=$value does not resolve yet. Add DNS or hosts entries before client testing."
+    fi
+}
+
 preflight_hostnames() {
-    local name value
-    for name in PUBLIC_API_HOST PUBLIC_CHAT_HOST; do
-        value="$(env_setting "$name")"
-        if [[ -z "$value" ]]; then
-            check_fail "$name is empty."
-            continue
-        fi
-        if ! command -v getent >/dev/null 2>&1; then
-            check_warn "getent is unavailable; $name=$value was not resolved."
-            continue
-        fi
-        if getent hosts "$value" >/dev/null 2>&1; then
-            check_ok "$name=$value resolves."
-        else
-            check_warn "$name=$value does not resolve yet. Add DNS or hosts entries before client testing."
-        fi
-    done
+    local old
+    check_hostname_resolves "public name" "$(public_fqdn)"
+    # Прежнее имя заполняется только на время окна смены DNS.
+    old="$(env_setting OLD_PUBLIC_HOST)"
+    if [[ -n "$old" ]]; then
+        check_hostname_resolves "OLD_PUBLIC_HOST" "$old"
+    fi
+    return 0
 }
 
 preflight_modes() {
@@ -400,29 +484,37 @@ case "$ACTION" in
         mode="${TARGETS[0]}"
         case "$mode" in
             status)
-                compose --profile gateway ps caddy
+                compose --profile gateway ps nginx
                 ;;
             internal|migration|external)
                 if [[ "$mode" == "migration" || "$mode" == "external" ]]; then
                     assert_tls_files
+                    assert_key_readable_by_nginx
                 fi
                 if [[ "$mode" == "migration" ]]; then
-                    assert_non_empty_setting OLD_PUBLIC_API_HOST
-                    assert_non_empty_setting OLD_PUBLIC_CHAT_HOST
-                    assert_non_empty_setting PUBLIC_API_HOST
-                    assert_non_empty_setting PUBLIC_CHAT_HOST
+                    assert_non_empty_setting OLD_PUBLIC_HOST
                 fi
-                [[ -f "$SCRIPT_DIR/caddy/Caddyfile.$mode" ]] ||
-                    fail "Missing Caddy config for gateway mode '$mode': $SCRIPT_DIR/caddy/Caddyfile.$mode"
+                template="$(gateway_template "$mode")"
+                [[ -f "$SCRIPT_DIR/${template#./}" ]] ||
+                    fail "Missing nginx template for gateway mode '$mode': $SCRIPT_DIR/${template#./}"
                 has_compose_profile gateway ||
                     fail "compose.yaml does not define the expected 'gateway' profile."
-                validate_caddyfile "$mode"
+                # Выпуск сертификата идёт до валидации: в режимах internal и
+                # migration nginx -t не пройдёт, пока файлов локального CA нет.
+                if [[ "$mode" == "internal" || "$mode" == "migration" ]]; then
+                    ensure_internal_ca
+                fi
+                validate_nginx_config "$mode"
                 export GATEWAY_MODE="$mode"
-                export CADDY_CONFIG_FILE="./caddy/Caddyfile.$mode"
-                compose --profile gateway up -d caddy
+                export NGINX_CONFIG_FILE="$template"
+                compose --profile gateway up -d nginx
                 persist_setting GATEWAY_MODE "$mode"
-                persist_setting CADDY_CONFIG_FILE "./caddy/Caddyfile.$mode"
+                persist_setting NGINX_CONFIG_FILE "$template"
                 printf "Gateway mode '%s' is active and recorded in .env.\n" "$mode"
+                if [[ "$mode" == "internal" || "$mode" == "migration" ]]; then
+                    printf "Install this root certificate into every client trust store: %s/internal-ca.crt\n" \
+                        "$(env_setting_default TLS_CERTS_DIR ./secrets/tls)"
+                fi
                 ;;
             *) fail "Usage: model.sh gateway <internal|migration|external|status>" ;;
         esac

@@ -11,7 +11,7 @@
 - [ ] Пользователи в группе `docker` минимизированы и осознают root-эквивалентность.
 - [ ] `.env` создан из `.env.example`, права `0600`, все `CHANGE_ME` заменены.
 - [ ] `LITELLM_SALT_KEY` сохранён отдельно: после первого запуска его нельзя менять.
-- [ ] `OPEN_WEBUI_LITELLM_KEY` пуст до создания отдельного virtual key.
+- [ ] `LITELLM_UI_PASSWORD` задан отдельным значением, не равным master-ключу.
 - [ ] `STORE_PROMPTS_IN_SPEND_LOGS=false`, если нет согласованного хранения prompts.
 - [ ] `VLLM_ALLOWED_MEDIA_DOMAINS=media.invalid`, если не нужен контролируемый URL-fetch изображений.
 - [ ] `secrets/` и `.env` не попадают в Git, чаты, тикеты и логи.
@@ -20,32 +20,33 @@
 
 - [ ] С пользовательской сети открыт только `443/tcp`.
 - [ ] `22/tcp` открыт только admin-сети.
-- [ ] LiteLLM, Open WebUI, Grafana, Prometheus, Alloy, PostgreSQL и vLLM не опубликованы наружу.
+- [ ] Grafana, Prometheus, Alloy, PostgreSQL и vLLM не опубликованы наружу; LiteLLM доступен только через шлюз.
 - [ ] UFW/firewall и `DOCKER-USER` проверены: Docker published ports не обходят политику.
-- [ ] Неизвестный Host/SNI на Caddy не обслуживает API/UI.
+- [ ] Неизвестный Host/SNI на nginx обрывается на рукопожатии (`ssl_reject_handshake`), а не отдаёт сертификат.
 
 ## TLS
 
 - [ ] Клиенты проверяют цепочку без `-k` / `verify=false`.
-- [ ] SAN сертификата содержит `PUBLIC_API_HOST` и `PUBLIC_CHAT_HOST`.
+- [ ] SAN сертификата содержит `PUBLIC_HOST` и `DNS_ZONE`.
 - [ ] Для internal CA клиентам выдан только root certificate; private key CA не копировался.
-- [ ] Для external/migration cert/key лежат в `secrets/caddy` с минимальными правами.
+- [ ] Для external/migration cert/key лежат в `secrets/tls` с минимальными правами.
 - [ ] HSTS включается только после окончательного перехода на сертификат заказчика.
 
 ## Идентификация и приложения
 
-- [ ] После старта LiteLLM создан отдельный virtual key для Open WebUI с allowlist моделей.
-- [ ] `OPEN_WEBUI_LITELLM_KEY` записан в `.env`, контейнер `open-webui` пересоздан.
+- [ ] Каждому клиенту выдан отдельный virtual key с allowlist моделей и бюджетом.
+- [ ] Master-ключ не выдан ни одному клиенту и не введён ни в одну форму, кроме админки при пустом `LITELLM_UI_PASSWORD`.
 - [ ] Master key LiteLLM используется только через SSH tunnel к admin UI, не раздаётся клиентам.
 - [ ] Каждому внешнему клиенту выдан свой virtual key, RPM/TPM/budget и срок действия.
-- [ ] Первый администратор Open WebUI создан, `WEBUI_ENABLE_SIGNUP=false`.
-- [ ] Tools/functions/plugins Open WebUI выключены, пока нет отдельного threat model.
+- [ ] Административные пути закрыты `ADMIN_ALLOW_CIDR` для всех, кроме рабочих подсетей.
 - [ ] Произвольные внешние `image_url` запрещены или ограничены allowlist.
 
 ## Контейнеры и supply chain
 
-- [ ] Наружу опубликован только Caddy.
-- [ ] Сети `edge` и `backend` разделены: Caddy не видит PostgreSQL/Alloy/Docker socket.
+- [ ] Наружу опубликован только nginx на 443.
+- [ ] `ADMIN_ALLOW_CIDR` сужен до рабочих подсетей: за административными путями стоит управление ключами, лимитами и бюджетами всего стека.
+- [ ] `LITELLM_UI_PASSWORD` задан. При пустом значении вход в админку идёт по master-ключу, и тот оседает в браузерах.
+- [ ] Сети `edge` и `backend` разделены: nginx не видит PostgreSQL, Alloy, Docker socket и vLLM.
 - [ ] Образы закреплены digest/тегом из `.env.example`, модели — revision.
 - [ ] Alloy privileged принят осознанно; входящий доступ к Alloy отсутствует.
 - [ ] `HF_TOKEN` имеет минимальный scope или пуст.
@@ -67,7 +68,7 @@ docker run --rm --network ai-vllm-stack_backend curlimages/curl -sS -G \
 
 ## Данные и приёмка
 
-- [ ] Backup `.env`, PostgreSQL, Open WebUI и Caddy CA защищён так же, как прод-секреты.
+- [ ] Backup `.env`, PostgreSQL и ключа локального CA защищён так же, как прод-секреты.
 - [ ] Если данные объявлены сохраняемыми — выполнен хотя бы один restore test.
 - [ ] Запрос без key / с отозванным key получает 401/403.
 - [ ] Превышение RPM/TPM блокируется.

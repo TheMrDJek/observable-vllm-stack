@@ -2,32 +2,38 @@
 
 ## Граница доступа
 
-Единственная клиентская точка входа — Caddy на `443/tcp`.
+Единственная клиентская точка входа — nginx на `443/tcp`.
 
 ```text
-клиент ── HTTPS/443 ── Caddy
-                        ├── api.vlm.local  ── LiteLLM:4000
-                        └── chat.vlm.local ── Open WebUI:8080
+клиент ── HTTPS/443 ── nginx ── vlm.rpa.local
+                                 ├── /v1/*    ── LiteLLM:4000  (инференс)
+                                 └── остальное ── LiteLLM:4000  (админка, allow/deny по IP)
 ```
 
 PostgreSQL, vLLM, Prometheus, Loki, Tempo и Alloy не являются клиентскими endpoints. Grafana также не публикуется наружу без отдельного решения по аутентификации и доступу. Docker-сети не считаются самостоятельной защитной границей, если сервис публикует host port.
 
-Compose публикует Caddy на `${PUBLIC_BIND_ADDRESS:-0.0.0.0}:${PUBLIC_HTTPS_PORT:-443}`. Диагностические порты LiteLLM, Open WebUI, vLLM, Grafana, Prometheus и Alloy привязаны к `127.0.0.1`.
+Compose публикует nginx на `${PUBLIC_BIND_ADDRESS:-0.0.0.0}:${PUBLIC_HTTPS_PORT:-443}`. Диагностические порты LiteLLM, vLLM, Grafana, Prometheus и Alloy привязаны к `127.0.0.1`.
 
-## Имена
+## Имя
 
-Используйте два стабильных имени:
+Стек публикует **одно** имя, которое собирается из двух переменных:
 
-- `PUBLIC_API_HOST=api.vlm.local` — машинные OpenAI-compatible клиенты;
-- `PUBLIC_CHAT_HOST=chat.vlm.local` — браузерный UI.
+```dotenv
+PUBLIC_HOST=vlm
+DNS_ZONE=rpa.local      # итог: vlm.rpa.local
+```
 
-Не объединяйте их path routing на одном имени без необходимости: отдельные имена упрощают политики, сертификаты, логи и будущий перенос. Сертификат может быть единым SAN или отдельным на каждое имя.
+Метка зоны разводит развёртывания: у двух заказчиков со своими стендами LiteLLM записи в DNS не столкнутся. Смена зоны — правка одной строки, включая переход на реальный домен (`DNS_ZONE=rpa.example.com`).
 
-Для internal CA имена должны разрешаться внутренним DNS/hosts. Для external-режима готовый сертификат должен покрывать оба имени. Сертификат на IP не заменяет сертификат на DNS-имя.
+По этому имени доступны и инференс, и админка: `/v1` и `/v1/*` идут в LiteLLM без ограничений по адресу, всё остальное — тоже в LiteLLM, но через `allow`/`deny` из `ADMIN_ALLOW_CIDR`.
+
+Цена решения, которую нужно понимать: инференс и управление делят origin и cookies, поэтому развести их разными политиками firewall уже нельзя — остаётся только ограничение по адресу внутри одного `server`. Если управление должно быть доступно строго уже, чем API, заводите второе имя.
+
+Для локального CA имя должно разрешаться внутренним DNS или hosts. Для external-режима сертификат должен покрывать это имя. Сертификат на IP не заменяет сертификат на DNS-имя.
 
 ### Выбор имён для прода
 
-`api.vlm.local` и `chat.vlm.local` — значения для лаборатории. Для постоянной эксплуатации замените их на поддомены домена, которым вы владеете, например `api.llm.example.com`.
+`vlm.rpa.local` и `vlm.rpa.local` — значения для лаборатории. Для постоянной эксплуатации замените их на поддомены домена, которым вы владеете, например `api.llm.example.com`.
 
 Суффикс `.local` **зарезервирован под mDNS** (RFC 6762). На системах с Avahi/Bonjour резолвер может перехватывать такие имена и не отдавать их обычному DNS, из-за чего часть клиентов будет ходить не туда или не резолвить вовсе. Публичный CA сертификат на `.local` не выпустит в принципе.
 
@@ -48,16 +54,6 @@ Compose публикует Caddy на `${PUBLIC_BIND_ADDRESS:-0.0.0.0}:${PUBLIC_
 
 Поэтому связка «имена в корпоративном DNS + сертификат корпоративного CA» — единственный вариант, при котором подключение нового сервера-клиента не требует никаких действий на нём самом.
 
-### Fallback: одно имя с path routing
-
-Если на площадке нельзя создать две DNS-записи, используйте [caddy/Caddyfile.single](../caddy/Caddyfile.single): одно имя `PUBLIC_API_HOST`, где `/v1/*` идёт в LiteLLM, а остальные пути — в Open WebUI.
-
-```bash
-CADDY_CONFIG_FILE=./caddy/Caddyfile.single docker compose --profile gateway up -d caddy
-```
-
-Это осознанный компромисс, а не рекомендуемый вариант. Что теряется: общие cookies и origin у API и UI, невозможность применить разные firewall/access policies к машинным клиентам и браузерам, привязка WebUI к особенностям API paths. `PUBLIC_CHAT_HOST` в этом режиме не используется. Команда `./model.sh gateway` этот режим не переключает — он задаётся только через `CADDY_CONFIG_FILE`.
-
 ## Режимы gateway
 
 ```text
@@ -65,18 +61,33 @@ model.ps1 gateway internal|migration|external|status
 model.sh  gateway internal|migration|external|status
 ```
 
-- `internal` — Caddy выпускает сертификаты от своей internal CA;
-- `migration` — старые `OLD_PUBLIC_*` имена используют internal CA, новые `PUBLIC_*` — готовые внешние certificate/key files;
+- `internal` — сертификат выпускает локальный CA, файлы лежат в `TLS_CERTS_DIR`;
+- `migration` — старые `OLD_PUBLIC_*` имена используют локальный CA, новые `PUBLIC_*` — готовые внешние certificate/key files;
 - `external` — оба `PUBLIC_*` имени используют `${TLS_CERTS_DIR}/${TLS_CERT_FILE}` и `${TLS_CERTS_DIR}/${TLS_KEY_FILE}`;
-- `status` — показывает только строку контейнера Caddy из `docker compose ps`.
+- `status` — показывает только строку контейнера nginx из `docker compose ps`.
 
-Перед запуском скрипт выполняет `caddy validate` для выбранного Caddyfile, а для `migration`/`external` дополнительно проверяет наличие и читаемость cert/key. Он **не** проверяет SAN, expiry, соответствие ключа сертификату и цепочку — это делает оператор командами из раздела [Переход на внешний сертификат](#переход-на-внешний-сертификат).
+Перед запуском скрипт прогоняет `nginx -t` для выбранного шаблона в одноразовом контейнере с тем же образом, пользователем и раскладкой томов, что и боевой сервис. Для `migration`/`external` дополнительно проверяются наличие cert/key и читаемость ключа под UID 101. Скрипт **не** проверяет SAN, expiry, соответствие ключа сертификату и цепочку — это делает оператор командами из раздела [Переход на внешний сертификат](#переход-на-внешний-сертификат).
 
-Файлы кладите по образцу [`secrets.example/caddy`](../secrets.example/caddy/README.md) в gitignored `secrets/caddy/`.
+Файлы кладите по образцу [`secrets.example/tls`](../secrets.example/tls/README.md) в gitignored `secrets/tls/`.
 
-Caddy не читает `GATEWAY_MODE` — он читает смонтированный файл из `CADDY_CONFIG_FILE`. Скрипт записывает обе переменные в `.env` после успешного переключения, поэтому последующий прямой `docker compose up -d` не откатит режим. Значение `GATEWAY_MODE` носит справочный характер.
+nginx не читает `GATEWAY_MODE` — он загружает шаблон, смонтированный из `NGINX_CONFIG_FILE`. Скрипт записывает обе переменные в `.env` после успешного переключения, поэтому последующий прямой `docker compose up -d` не откатит режим. Значение `GATEWAY_MODE` носит справочный характер.
 
-## Internal CA
+## Локальный CA
+
+У nginx нет встроенного центра сертификации, поэтому сертификат выпускает скрипт [`nginx/internal-ca.sh`](../nginx/internal-ca.sh). Он выполняется в одноразовом контейнере с openssl, поэтому openssl на хосте не нужен и Windows с Ubuntu дают одинаковый результат.
+
+Что появляется в `TLS_CERTS_DIR`:
+
+| Файл | Назначение |
+|---|---|
+| `internal-ca.crt` | корневой сертификат, его ставят в trust store клиентов |
+| `internal-ca.key` | приватный ключ CA, не покидает этот хост |
+| `internal.crt` / `internal.key` | сертификат шлюза со всеми именами в SAN |
+| `internal.san` | список имён последнего выпуска, для сравнения при перевыпуске |
+
+Ключ CA создаётся один раз и переиспользуется: иначе каждая правка имён требовала бы заново обойти trust store всех клиентов. Leaf перевыпускается автоматически, когда меняется набор имён в `.env` или до истечения остаётся менее 30 дней. Срок действия CA — 10 лет, leaf — 825 дней, ключи ECDSA P-256.
+
+Leaf покрывает сразу все заполненные имена, включая `OLD_PUBLIC_*`, поэтому переключение `internal` → `migration` не требует отдельного выпуска.
 
 Плюсы: быстрый запуск, не нужен публичный DNS или интернет. Минусы: root CA нужно безопасно доставить каждому клиенту; компрометация CA критична.
 
@@ -108,20 +119,29 @@ Caddy не читает `GATEWAY_MODE` — он читает смонтиров�
 Проверить файлы до переключения:
 
 ```bash
-openssl x509 -in secrets/caddy/server.crt -noout -subject -issuer -dates -ext subjectAltName
+openssl x509 -in secrets/tls/server.crt -noout -subject -issuer -dates -ext subjectAltName
 # отпечатки должны совпадать: ключ соответствует сертификату
-openssl x509 -in secrets/caddy/server.crt -noout -pubkey | openssl sha256
-openssl pkey -in secrets/caddy/server.key -pubout | openssl sha256
+openssl x509 -in secrets/tls/server.crt -noout -pubkey | openssl sha256
+openssl pkey -in secrets/tls/server.key -pubout | openssl sha256
 ```
 
-Текущие Caddyfiles отключают HTTP redirect и не выполняют ACME. Порт 80 стек не публикует. Получение и renewal внешнего сертификата — внешний процесс.
+Права на ключ. nginx работает в контейнере под UID 101 и обязан прочитать файл сам, поэтому ключ с правами `0600` и владельцем root не даст шлюзу стартовать:
+
+```bash
+sudo chown 0:101 secrets/tls/server.key
+sudo chmod 0640 secrets/tls/server.key
+```
+
+Проверку выполняет `model.sh gateway external|migration` до перезапуска, но лучше выставить права сразу.
+
+Конфигурации nginx не выполняют ACME и не публикуют порт 80: HTTP-редиректа нет, слушается только HTTPS. Получение и renewal внешнего сертификата — внешний процесс.
 
 ### Сценарий A: имена не меняются, меняется только сертификат
 
-Самый простой случай. Client base URL не меняется, данные и активная модель сохраняются, перезапускается только Caddy.
+Самый простой случай. Client base URL не меняется, данные и активная модель сохраняются, перезапускается только nginx.
 
 ```bash
-# файлы уже в secrets/caddy/ под именами из TLS_CERT_FILE и TLS_KEY_FILE
+# файлы уже в secrets/tls/ под именами из TLS_CERT_FILE и TLS_KEY_FILE
 ./model.sh gateway external
 ./model.sh gateway status
 ```
@@ -129,17 +149,17 @@ openssl pkey -in secrets/caddy/server.key -pubout | openssl sha256
 Проверить с клиента и подготовить rollback:
 
 ```bash
-curl -fsS https://api.vlm.local/v1/models -H "Authorization: Bearer $CLIENT_VIRTUAL_KEY"
+curl -fsS https://vlm.rpa.local/v1/models -H "Authorization: Bearer $CLIENT_VIRTUAL_KEY"
 # откат при ошибке
 ./model.sh gateway internal
 ```
 
 ### Сценарий B: одновременно меняются DNS-имена и сертификат
 
-Главный риск — часть клиентов идёт на старые имена, часть на новые, а один из наборов уже не обслуживается. Поэтому нужен параллельный режим `migration`, где Caddy на одном 443 обслуживает обе пары имён и различает их по SNI.
+Главный риск — часть клиентов идёт на старые имена, часть на новые, а один из наборов уже не обслуживается. Поэтому нужен параллельный режим `migration`, где nginx на одном 443 обслуживает обе пары имён и различает их по SNI.
 
 1. За 24–48 часов снизьте TTL старых имён.
-2. Запишите старые имена в `OLD_PUBLIC_API_HOST`/`OLD_PUBLIC_CHAT_HOST`, новые — в `PUBLIC_API_HOST`/`PUBLIC_CHAT_HOST`. Пустые `OLD_PUBLIC_*` делают migration-конфигурацию некорректной, и скрипт откажется её запускать.
+2. Запишите прежнее полное имя вместе с его зоной в `OLD_PUBLIC_HOST`, а новое — в `PUBLIC_HOST` и `DNS_ZONE`. Пустой `OLD_PUBLIC_HOST` делает migration-конфигурацию некорректной, и скрипт откажется её запускать.
 3. Положите внешний certificate/key pair в `TLS_CERTS_DIR`; сертификат должен покрывать **новые** имена.
 4. Выполните `./model.sh gateway migration`.
 5. Проверьте оба набора: старые имена — с internal trust, новые — с внешней цепочкой. Новый IP проверяется принудительно, без правки клиентского DNS:
@@ -150,7 +170,7 @@ curl -fsS https://api.vlm.local/v1/models -H "Authorization: Bearer $CLIENT_VIRT
      https://api.example.com/v1/models
    ```
 
-6. Обновите API base URLs у клиентов, настройки Open WebUI/OAuth/CORS и предупредите пользователей: browser cookies и сессии между hostnames не переносятся, потребуется повторный вход.
+6. Обновите API base URLs у клиентов и предупредите тех, кто пользуется админкой: cookies сессии между именами не переносятся, потребуется повторный вход.
 7. Наблюдайте оба набора имён не меньше старого TTL плюс запас.
 8. Выполните `./model.sh gateway external`, когда трафик на старые имена прекратился.
 9. Удалите старые DNS/hosts-записи и только после этого — internal root CA из trust stores клиентов.
@@ -161,10 +181,16 @@ curl -fsS https://api.vlm.local/v1/models -H "Authorization: Bearer $CLIENT_VIRT
 
 ### После замены файлов в уже активном режиме
 
-Caddy читает cert/key при загрузке конфигурации. Подмена файлов на диске сама по себе перечитывания не вызывает:
+nginx читает cert/key при загрузке конфигурации. Подмена файлов на диске сама по себе перечитывания не вызывает. Предпочтительна перезагрузка без разрыва соединений:
 
 ```bash
-docker compose --profile gateway restart caddy
+docker compose --profile gateway exec nginx nginx -s reload
+```
+
+Полный перезапуск тоже допустим, но обрывает активные потоки генерации:
+
+```bash
+docker compose --profile gateway restart nginx
 ```
 
 ## Firewall и Docker
@@ -183,27 +209,29 @@ sudo ufw status verbose
 С другой машины просканируйте только согласованные адреса:
 
 ```bash
-nmap -Pn -p 22,80,443,3000,3001,4000,8001,8002,9090,12345 <server-ip>
+nmap -Pn -p 22,80,443,3001,4000,8001,8002,9090,12345 <server-ip>
 ```
 
 Ожидаемо открыт 443 и, только для управляющей сети, 22. Порт 80 зависит от выбранного ACME challenge. Остальные должны быть закрыты.
 
 ## Фактическая маршрутизация
 
-- API-host пропускает только `/v1` и `/v1/*` в LiteLLM; остальные пути, включая `/key/generate` и LiteLLM UI, получают `404`;
-- chat-host целиком проксируется в Open WebUI;
-- `flush_interval -1` используется для streaming;
-- dial timeout равен 10 секундам, остальные proxy timeouts — 10 минут;
-- HTTP redirect отключён, Caddy слушает HTTPS внутри контейнера на 8443;
-- контейнер Caddy read-only, с `cap_drop: ALL` и `no-new-privileges`.
+- API-host пропускает только `/v1` и `/v1/*` в LiteLLM; остальные пути, включая `/key/generate` и LiteLLM UI, получают `404`. Точные правила — `location = /v1` и `location ^~ /v1/`: обычный префиксный `location /v1` пропускал бы наружу и `/v1beta`, и `/v1-internal`;
+- административные пути проксируются в тот же LiteLLM, но внутри `location /` с `allow`/`deny` из `ADMIN_ALLOW_CIDR`; заголовки `Upgrade`/`Connection` пробрасываются;
+- `proxy_buffering off` и `proxy_request_buffering off` обеспечивают потоковую выдачу токенов; без первого весь ответ копится в буфере и приходит одним куском в конце генерации;
+- `proxy_connect_timeout` равен 10 секундам, остальные proxy timeouts — 10 минут;
+- имена апстримов резолвятся на каждый запрос через `resolver 127.0.0.11`, поэтому пересоздание LiteLLM не требует перезагрузки шлюза;
+- соединения с неизвестным SNI обрываются на рукопожатии через `ssl_reject_handshake`, чужой хост не получит наш сертификат;
+- HTTP redirect отсутствует, nginx слушает HTTPS внутри контейнера на 8443, наружу публикуется 443;
+- контейнер работает под UID 101 в образе `nginx-unprivileged`, read-only, с `cap_drop: ALL` и `no-new-privileges`. Обычный образ nginx потребовал бы `CAP_SETUID`/`CAP_SETGID` для перехода воркеров в непривилегированного пользователя.
 
 Удалённые `image_url` по умолчанию заблокированы фиктивным allowlist `media.invalid`, redirects выключены. `data:` URL продолжают работать. Если изменить `VLLM_ALLOWED_MEDIA_DOMAINS`, владелец конфигурации принимает SSRF-риск разрешённых доменов и их DNS.
 
 ## Диагностика
 
 ```bash
-openssl s_client -connect api.vlm.local:443 -servername api.vlm.local -showcerts
-curl -v https://api.vlm.local/v1/models
+openssl s_client -connect vlm.rpa.local:443 -servername vlm.rpa.local -showcerts
+curl -v https://vlm.rpa.local/v1/models
 ```
 
 Не добавляйте `-k`. Ошибка должна быть исправлена в DNS, SAN, цепочке или trust store, а не скрыта.

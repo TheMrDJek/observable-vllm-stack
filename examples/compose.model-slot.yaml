@@ -2,9 +2,14 @@
 # Load it with COMPOSE_FILE=compose.yaml:examples/compose.model-slot.yaml on POSIX,
 # or COMPOSE_FILE=compose.yaml;examples/compose.model-slot.yaml on Windows.
 #
+# A slot is only half of the wiring: add a matching model_list entry to
+# config/litellm.yaml whose model_name equals --served-model-name and whose
+# api_base points at http://vllm-alt:8000/v1. Without it the slot starts but no
+# client can address the model through LiteLLM.
+#
 # For a second GPU assign an explicit device, for example under deploy.resources:
 #   reservations.devices[0].device_ids: ["1"]
-# Do not publish an extra host port; clients must go through LiteLLM/Caddy.
+# Do not publish an extra host port; clients must go through LiteLLM/nginx.
 services:
   vllm-alt:
     profiles: [alt]

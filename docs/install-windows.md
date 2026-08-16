@@ -36,7 +36,7 @@ Copy-Item .env.example .env
 notepad .env
 ```
 
-Замените каждый `CHANGE_ME`. Используйте разные случайные секреты. `LITELLM_MASTER_KEY` и `LITELLM_SALT_KEY` должны начинаться с `sk-`; salt нельзя менять после появления зашифрованных данных. При первом запуске оставьте `OPEN_WEBUI_LITELLM_KEY=` пустым.
+Замените каждый `CHANGE_ME`. Используйте разные случайные секреты. `LITELLM_MASTER_KEY` и `LITELLM_SALT_KEY` должны начинаться с `sk-`; salt нельзя менять после появления зашифрованных данных. Отдельно задайте `LITELLM_UI_PASSWORD` — без него вход в админку идёт по master-ключу.
 
 Не храните репозиторий в общедоступной папке и не синхронизируйте `.env` через облачный диск. Проверьте, что `.env` исключён из Git.
 
@@ -45,13 +45,13 @@ notepad .env
 ```powershell
 .\model.ps1 preflight
 .\model.ps1 observability local
-.\model.ps1 start main -GpuMetrics
 .\model.ps1 gateway internal
+.\model.ps1 start main -GpuMetrics
 .\model.ps1 status
 docker compose --profile main logs -f vllm-main
 ```
 
-`preflight` проверяет Docker, GPU из контейнера, диск, занятость публичного порта и разрешение hostnames. `observability local` поднимает не только телеметрию, но и PostgreSQL, LiteLLM, Open WebUI и Alloy — это первый шаг развёртывания, а не опция.
+`preflight` проверяет Docker, GPU из контейнера, диск, занятость публичного порта и разрешение hostname. `observability local` поднимает не только телеметрию, но и PostgreSQL, LiteLLM и Alloy — это первый шаг развёртывания, а не опция.
 
 **Первый запуск модели занимает 10–30 минут**: качается ~4 GiB весов, затем модель грузится в VRAM. Состояние `health: starting` в это время нормально. `Ctrl+C` прекращает просмотр логов, но не контейнер.
 
@@ -70,16 +70,17 @@ docker compose --profile main logs -f vllm-main
 
 Скрипт не проверяет VRAM. На одной RTX 4070 Ti 12 GiB этот режим с текущими профилями, вероятнее всего, закончится OOM.
 
-## Ключ Open WebUI
+## Virtual key для клиентов
 
-После запуска LiteLLM создайте отдельный virtual key через loopback. Публичный HTTPS route намеренно не пропускает `/key/generate`:
+Master-ключ клиентам не выдают: он управляет всем стеком. Каждому потребителю выпускается отдельный ключ с allowlist моделей и бюджетом.
 
 ```powershell
 $masterKey = Read-Host "LiteLLM master key"
 $body = @{
-    key_alias = "open-webui"
-    models = @("qwen3.5-4b-awq", "qwen3-4b-awq")
-} | ConvertTo-Json
+    key_alias = "acceptance"
+    models = @("qwen3.5-4b-awq")
+    max_budget = 100
+} | ConvertTo-Json -Compress
 
 $virtualKey = Invoke-RestMethod `
     -Uri "http://127.0.0.1:4000/key/generate" `
@@ -92,13 +93,9 @@ $virtualKey.key
 Remove-Variable masterKey
 ```
 
-Запишите выведенный ключ в `OPEN_WEBUI_LITELLM_KEY` файла `.env`, затем:
+`Invoke-RestMethod`, а не `curl.exe`: PowerShell 5.1 теряет двойные кавычки при передаче аргументов нативным программам, и JSON доходит до сервера повреждённым.
 
-```powershell
-docker compose up -d --force-recreate open-webui
-```
-
-Не используйте `LITELLM_MASTER_KEY` как ключ Open WebUI.
+Отзыв ключа — `POST /key/delete` с тем же master-ключом; остальные ключи при этом не затрагиваются.
 
 ## HTTPS на локальной машине
 
@@ -107,22 +104,22 @@ docker compose up -d --force-recreate open-webui
 .\model.ps1 gateway status
 ```
 
-Назначьте значения `PUBLIC_API_HOST` и `PUBLIC_CHAT_HOST` адресу локального хоста через внутренний DNS или hosts-файл. Для значений по умолчанию:
+Свяжите имя из `PUBLIC_HOST` и `DNS_ZONE` с адресом локального хоста через hosts-файл. Для значений по умолчанию:
 
 ```text
-127.0.0.1 api.vlm.local
-127.0.0.1 chat.vlm.local
+127.0.0.1 vlm.rpa.local
 ```
 
-Скопируйте root CA из Caddy:
+Корневой сертификат локального центра выпускается командой `gateway internal` и лежит файлом — копировать из контейнера нечего:
 
 ```powershell
-docker compose --profile gateway cp `
-  caddy:/data/caddy/pki/authorities/local/root.crt `
-  .\caddy-local-root.crt
+Import-Certificate -FilePath .\secrets\tls\internal-ca.crt `
+  -CertStoreLocation Cert:\LocalMachine\Root
 ```
 
-Установите root CA Caddy в хранилище `Trusted Root Certification Authorities` только на доверенных тестовых машинах. Не используйте `-k`/`--insecure`: это скрывает ошибки DNS, цепочки доверия и подмену сервера. Подробности — в [быстром старте HTTPS](quick-start-https.md).
+Команда требует прав администратора. **Без этого шага проверки через `curl.exe` работать не будут**: и встроенный curl, и curl из Git Bash используют Schannel, который доверяет только хранилищу Windows и игнорирует `--cacert`.
+
+Устанавливайте root CA в хранилище `Trusted Root Certification Authorities` только на доверенных тестовых машинах. Не используйте `-k`/`--insecure`: это скрывает ошибки DNS, цепочки доверия и подмену сервера. Подробности — в [быстром старте HTTPS](quick-start-https.md).
 
 ## Ограничения Windows
 
@@ -140,7 +137,7 @@ docker compose --profile gateway cp `
 .\model.ps1 status
 ```
 
-Не используйте `docker compose down -v`, если нужны чаты, журнал LiteLLM, настройки Grafana, метрики, логи или трейсы. Кэш `data\huggingface` является bind-mounted каталогом и удаляется отдельно.
+Не используйте `docker compose down -v`, если нужны ключи и журнал LiteLLM, настройки Grafana, метрики, логи или трейсы. Кэш `data\huggingface` является bind-mounted каталогом и удаляется отдельно.
 
 ## Локальный air-gap
 

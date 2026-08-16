@@ -42,7 +42,7 @@ function Invoke-Compose {
 
 # Windows PowerShell 5.1 оборачивает каждую строку stderr нативной команды в
 # ErrorRecord, что при $ErrorActionPreference = 'Stop' обрывает скрипт даже
-# когда программа вернула код 0. Утилиты вроде 'caddy validate' пишут в stderr
+# когда программа вернула код 0. Утилиты вроде 'nginx -t' пишут в stderr
 # и при успехе, поэтому любой docker-вызов с захватом вывода идёт через эту функцию.
 function Invoke-DockerCapture {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
@@ -135,7 +135,11 @@ function Assert-Targets {
             throw "Unknown model slot '$value'. Available slots: $known."
         }
     }
-    if (($Values | Select-Object -Unique).Count -ne $Values.Count) {
+    # Обёртка @() обязательна: конвейер из одного элемента возвращает скаляр, а
+    # не массив, и обращение к .Count на строке под Set-StrictMode -Version
+    # Latest завершается PropertyNotFoundStrict. Это ломало любой 'start <слот>'
+    # с одним аргументом, то есть основной сценарий.
+    if (@($Values | Select-Object -Unique).Count -ne @($Values).Count) {
         throw "Model slots must not be repeated."
     }
 }
@@ -178,13 +182,7 @@ function Test-ComposeProfile {
 function Assert-TlsFiles {
     param([Parameter(Mandatory = $true)][hashtable]$FileSettings)
 
-    $directory = Get-Setting -Name "TLS_CERTS_DIR" -FileSettings $FileSettings
-    if ([string]::IsNullOrWhiteSpace($directory)) {
-        throw "Missing required setting TLS_CERTS_DIR."
-    }
-    if (-not [IO.Path]::IsPathRooted($directory)) {
-        $directory = Join-Path $PSScriptRoot $directory
-    }
+    $directory = Get-CertsDirectory -FileSettings $FileSettings
     foreach ($name in @("TLS_CERT_FILE", "TLS_KEY_FILE")) {
         $fileName = Get-Setting -Name $name -FileSettings $FileSettings
         if ([string]::IsNullOrWhiteSpace($fileName)) {
@@ -257,43 +255,163 @@ function Set-DotEnvSetting {
     [IO.File]::WriteAllLines($Path, $result.ToArray(), (New-Object System.Text.UTF8Encoding($false)))
 }
 
-function Test-CaddyConfig {
+# Повторяет значения по умолчанию из compose.yaml. Валидация обязана видеть ту
+# же конфигурацию, что и запуск, иначе .env без новых ключей прошёл бы nginx -t
+# с пустыми путями к сертификату и упал уже на старте контейнера.
+function Get-SettingOrDefault {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][hashtable]$FileSettings,
+        [Parameter(Mandatory = $true)][string]$Default
+    )
+
+    $value = Get-Setting -Name $Name -FileSettings $FileSettings
+    if ([string]::IsNullOrWhiteSpace($value)) { return $Default }
+    return $value
+}
+
+function Get-PublicFqdn {
+    param([Parameter(Mandatory = $true)][hashtable]$FileSettings)
+
+    $host_ = Get-SettingOrDefault -Name "PUBLIC_HOST" -FileSettings $FileSettings -Default "vlm"
+    $zone = Get-SettingOrDefault -Name "DNS_ZONE" -FileSettings $FileSettings -Default "rpa.local"
+    return "$host_.$zone"
+}
+
+function Get-NginxImage {
+    param([Parameter(Mandatory = $true)][hashtable]$FileSettings)
+
+    $version = Get-SettingOrDefault -Name "NGINX_VERSION" -FileSettings $FileSettings -Default "1.29-alpine"
+    return "nginxinc/nginx-unprivileged:$version"
+}
+
+function Get-GatewayTemplate {
+    param([Parameter(Mandatory = $true)][string]$Mode)
+
+    return "./nginx/templates/gateway.$Mode.conf.template"
+}
+
+function Get-CertsDirectory {
+    param([Parameter(Mandatory = $true)][hashtable]$FileSettings)
+
+    $certsDir = Get-SettingOrDefault -Name "TLS_CERTS_DIR" -FileSettings $FileSettings -Default "./secrets/tls"
+    if (-not [IO.Path]::IsPathRooted($certsDir)) {
+        $certsDir = Join-Path $PSScriptRoot $certsDir
+    }
+    return $certsDir
+}
+
+# У nginx нет аналога директивы 'tls internal' прежнего Caddy, поэтому
+# сертификат локального CA выпускается здесь. Ключ CA переиспользуется, пока
+# файл на месте: его смена обесценила бы trust store всех клиентов.
+# Leaf покрывает все заполненные имена сразу, включая OLD_PUBLIC_*, — тогда
+# переключение internal -> migration не требует отдельного выпуска.
+function New-InternalCertificate {
+    param([Parameter(Mandatory = $true)][hashtable]$FileSettings)
+
+    $certsDir = Get-CertsDirectory -FileSettings $FileSettings
+    if (-not (Test-Path -LiteralPath $certsDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $certsDir -Force | Out-Null
+    }
+
+    $names = @()
+    $names += (Get-PublicFqdn -FileSettings $FileSettings)
+    $old = Get-Setting -Name "OLD_PUBLIC_HOST" -FileSettings $FileSettings
+    if (-not [string]::IsNullOrWhiteSpace($old)) { $names += $old }
+    if ($names.Count -eq 0) {
+        throw "No hostnames are set. The internal certificate cannot be issued."
+    }
+
+    $opensslVersion = Get-SettingOrDefault -Name "OPENSSL_VERSION" -FileSettings $FileSettings -Default "3.5.4"
+    $arguments = @(
+        "run", "--rm",
+        "-e", "SAN_NAMES=$($names -join ' ')",
+        "-e", "CERT_FILE=$(Get-SettingOrDefault -Name 'TLS_INTERNAL_CERT_FILE' -FileSettings $FileSettings -Default 'internal.crt')",
+        "-e", "KEY_FILE=$(Get-SettingOrDefault -Name 'TLS_INTERNAL_KEY_FILE' -FileSettings $FileSettings -Default 'internal.key')",
+        "-v", "${certsDir}:/certs",
+        "-v", "$(Join-Path $PSScriptRoot 'nginx\internal-ca.sh'):/internal-ca.sh:ro",
+        "--entrypoint", "/bin/sh",
+        "alpine/openssl:$opensslVersion", "/internal-ca.sh"
+    )
+
+    $result = Invoke-DockerCapture -Arguments $arguments
+    if ($result.ExitCode -ne 0) {
+        throw ("Issuing the internal certificate failed. The gateway was not changed.`n" +
+            ($result.Output -join [Environment]::NewLine))
+    }
+    Write-Host ($result.Output -join [Environment]::NewLine)
+}
+
+# nginx работает под UID 101 и читает ключ сам. Проверка вынесена отдельно от
+# nginx -t только ради понятного сообщения: иначе оператор получил бы
+# 'cannot load certificate key ... Permission denied' без объяснения причины.
+function Assert-KeyReadableByNginx {
+    param([Parameter(Mandatory = $true)][hashtable]$FileSettings)
+
+    $certsDir = Get-CertsDirectory -FileSettings $FileSettings
+    $keyFile = Get-Setting -Name "TLS_KEY_FILE" -FileSettings $FileSettings
+    if ([string]::IsNullOrWhiteSpace($keyFile)) {
+        throw "Missing required setting TLS_KEY_FILE."
+    }
+
+    $result = Invoke-DockerCapture -Arguments @(
+        "run", "--rm", "--user", "101:101",
+        "-v", "${certsDir}:/certs:ro",
+        "--entrypoint", "/bin/sh",
+        (Get-NginxImage -FileSettings $FileSettings),
+        "-c", "test -r /certs/$keyFile"
+    )
+    if ($result.ExitCode -ne 0) {
+        throw ("$keyFile is not readable by UID 101, under which nginx runs.`n" +
+            "On Linux: sudo chown 0:101 '$certsDir/$keyFile' && sudo chmod 0640 '$certsDir/$keyFile'")
+    }
+}
+
+# Прогоняется тот же образ, entrypoint, пользователь и раскладка томов, что и в
+# compose, поэтому проверка ловит не только синтаксис, но и нечитаемые
+# сертификаты. tmpfs на conf.d обязателен: туда entrypoint рендерит шаблоны.
+function Test-NginxConfig {
     param(
         [Parameter(Mandatory = $true)][string]$Mode,
         [Parameter(Mandatory = $true)][hashtable]$FileSettings
     )
 
-    $version = Get-Setting -Name "CADDY_VERSION" -FileSettings $FileSettings
-    if ([string]::IsNullOrWhiteSpace($version)) { $version = "2.10.2-alpine" }
+    $certsDir = Get-CertsDirectory -FileSettings $FileSettings
 
-    $certsDir = Get-Setting -Name "TLS_CERTS_DIR" -FileSettings $FileSettings
-    if ([string]::IsNullOrWhiteSpace($certsDir)) { $certsDir = "./secrets/caddy" }
-    if (-not [IO.Path]::IsPathRooted($certsDir)) {
-        $certsDir = Join-Path $PSScriptRoot $certsDir
+    $arguments = @(
+        "run", "--rm", "--user", "101:101",
+        "--tmpfs", "/etc/nginx/conf.d:mode=1777",
+        "--tmpfs", "/tmp:mode=1777"
+    )
+    $arguments += @("-e", "PUBLIC_HOST=$(Get-SettingOrDefault -Name 'PUBLIC_HOST' -FileSettings $FileSettings -Default 'vlm')")
+    $arguments += @("-e", "DNS_ZONE=$(Get-SettingOrDefault -Name 'DNS_ZONE' -FileSettings $FileSettings -Default 'rpa.local')")
+    $old = Get-Setting -Name "OLD_PUBLIC_HOST" -FileSettings $FileSettings
+    if ($null -eq $old) { $old = "" }
+    $arguments += @("-e", "OLD_PUBLIC_HOST=$old")
+    $arguments += @("-e", "ADMIN_ALLOW_CIDR=$(Get-SettingOrDefault -Name 'ADMIN_ALLOW_CIDR' -FileSettings $FileSettings -Default 'all')")
+    $defaults = @{
+        TLS_CERT_FILE             = "server.crt"
+        TLS_KEY_FILE              = "server.key"
+        TLS_INTERNAL_CERT_FILE    = "internal.crt"
+        TLS_INTERNAL_KEY_FILE     = "internal.key"
+        NGINX_CLIENT_MAX_BODY_SIZE = "0"
     }
-
-    $arguments = @("run", "--rm")
-    foreach ($name in @("PUBLIC_API_HOST", "PUBLIC_CHAT_HOST",
-            "OLD_PUBLIC_API_HOST", "OLD_PUBLIC_CHAT_HOST",
-            "TLS_CERT_FILE", "TLS_KEY_FILE")) {
-        $value = Get-Setting -Name $name -FileSettings $FileSettings
-        if ($null -eq $value) { $value = "" }
+    foreach ($name in $defaults.Keys) {
+        $value = Get-SettingOrDefault -Name $name -FileSettings $FileSettings -Default $defaults[$name]
         $arguments += @("-e", "$name=$value")
     }
-    # Монтируем ту же раскладку, что использует compose. Если смонтировать весь
-    # каталог caddy как read-only, вложенную точку /etc/caddy/certs создать
-    # невозможно, и docker завершится с ошибкой ещё до разбора конфигурации Caddy.
-    $arguments += @("-v", "$(Join-Path $PSScriptRoot "caddy\Caddyfile.$Mode"):/etc/caddy/Caddyfile:ro")
-    $arguments += @("-v", "$(Join-Path $PSScriptRoot 'caddy\routes.caddy'):/etc/caddy/routes.caddy:ro")
+    $arguments += @("-e", 'NGINX_ENVSUBST_FILTER=^(PUBLIC_|OLD_PUBLIC_|TLS_|NGINX_CLIENT_|DNS_ZONE|ADMIN_)')
+    $arguments += @("-v", "$(Join-Path $PSScriptRoot 'nginx\templates\common.conf.template'):/etc/nginx/templates/00-common.conf.template:ro")
+    $arguments += @("-v", "$(Join-Path $PSScriptRoot "nginx\templates\gateway.$Mode.conf.template"):/etc/nginx/templates/10-gateway.conf.template:ro")
+    $arguments += @("-v", "$(Join-Path $PSScriptRoot 'nginx\routes'):/etc/nginx/routes:ro")
     if (Test-Path -LiteralPath $certsDir -PathType Container) {
-        $arguments += @("-v", "${certsDir}:/etc/caddy/certs:ro")
+        $arguments += @("-v", "${certsDir}:/etc/nginx/certs:ro")
     }
-    $arguments += @("caddy:$version", "caddy", "validate",
-        "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile")
+    $arguments += @((Get-NginxImage -FileSettings $FileSettings), "nginx", "-t")
 
     $result = Invoke-DockerCapture -Arguments $arguments
     if ($result.ExitCode -ne 0) {
-        throw ("caddy/Caddyfile.$Mode did not pass 'caddy validate'. The gateway was not changed.`n" +
+        throw ("$(Get-GatewayTemplate -Mode $Mode) did not pass 'nginx -t'. The gateway was not changed.`n" +
             ($result.Output -join [Environment]::NewLine))
     }
 }
@@ -353,9 +471,9 @@ function Test-PreflightPort {
     if ([string]::IsNullOrWhiteSpace($port)) { $port = "443" }
 
     $running = Invoke-DockerCapture -Arguments @(
-        "compose", "--profile", "gateway", "ps", "--status", "running", "caddy")
-    if ($running.ExitCode -eq 0 -and (($running.Output -join "`n") -match "caddy")) {
-        Write-CheckOk "Port $port is held by this stack's Caddy."
+        "compose", "--profile", "gateway", "ps", "--status", "running", "nginx")
+    if ($running.ExitCode -eq 0 -and (($running.Output -join "`n") -match "nginx")) {
+        Write-CheckOk "Port $port is held by this stack's nginx."
         return
     }
     try {
@@ -376,18 +494,19 @@ function Test-PreflightPort {
 function Test-PreflightHostnames {
     param([Parameter(Mandatory = $true)][hashtable]$FileSettings)
 
-    foreach ($name in @("PUBLIC_API_HOST", "PUBLIC_CHAT_HOST")) {
-        $value = Get-Setting -Name $name -FileSettings $FileSettings
-        if ([string]::IsNullOrWhiteSpace($value)) {
-            Write-CheckFail "$name is empty."
-            continue
-        }
+    $names = @{ "public name" = (Get-PublicFqdn -FileSettings $FileSettings) }
+    # Прежнее имя заполняется только на время окна смены DNS.
+    $old = Get-Setting -Name "OLD_PUBLIC_HOST" -FileSettings $FileSettings
+    if (-not [string]::IsNullOrWhiteSpace($old)) { $names["OLD_PUBLIC_HOST"] = $old }
+
+    foreach ($label in $names.Keys) {
+        $value = $names[$label]
         try {
             [void][Net.Dns]::GetHostAddresses($value)
-            Write-CheckOk "$name=$value resolves."
+            Write-CheckOk "$label=$value resolves."
         }
         catch {
-            Write-CheckWarn "$name=$value does not resolve yet. Add DNS or hosts entries before client testing."
+            Write-CheckWarn "$label=$value does not resolve yet. Add DNS or hosts entries before client testing."
         }
     }
 }
@@ -522,31 +641,40 @@ try {
             }
             $mode = $Targets[0]
             if ($mode -eq "status") {
-                Invoke-Compose -Arguments @("--profile", "gateway", "ps", "caddy")
+                Invoke-Compose -Arguments @("--profile", "gateway", "ps", "nginx")
                 break
             }
             if ($mode -in @("migration", "external")) {
                 Assert-TlsFiles -FileSettings $fileSettings
+                Assert-KeyReadableByNginx -FileSettings $fileSettings
             }
             if ($mode -eq "migration") {
-                foreach ($name in @("OLD_PUBLIC_API_HOST", "OLD_PUBLIC_CHAT_HOST", "PUBLIC_API_HOST", "PUBLIC_CHAT_HOST")) {
-                    Assert-NonEmptySetting -Name $name -FileSettings $fileSettings
-                }
+                Assert-NonEmptySetting -Name "OLD_PUBLIC_HOST" -FileSettings $fileSettings
             }
-            $configPath = Join-Path $PSScriptRoot "caddy\Caddyfile.$mode"
+            $template = Get-GatewayTemplate -Mode $mode
+            $configPath = Join-Path $PSScriptRoot "nginx\templates\gateway.$mode.conf.template"
             if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
-                throw "Missing Caddy config for gateway mode '$mode': $configPath"
+                throw "Missing nginx template for gateway mode '$mode': $configPath"
             }
             if (-not (Test-ComposeProfile -Profile "gateway")) {
                 throw "compose.yaml does not define the expected 'gateway' profile."
             }
-            Test-CaddyConfig -Mode $mode -FileSettings $fileSettings
+            # Выпуск сертификата идёт до валидации: в режимах internal и
+            # migration nginx -t не пройдёт, пока файлов локального CA нет.
+            if ($mode -in @("internal", "migration")) {
+                New-InternalCertificate -FileSettings $fileSettings
+            }
+            Test-NginxConfig -Mode $mode -FileSettings $fileSettings
             $env:GATEWAY_MODE = $mode
-            $env:CADDY_CONFIG_FILE = "./caddy/Caddyfile.$mode"
-            Invoke-Compose -Arguments @("--profile", "gateway", "up", "-d", "caddy")
+            $env:NGINX_CONFIG_FILE = $template
+            Invoke-Compose -Arguments @("--profile", "gateway", "up", "-d", "nginx")
             Set-DotEnvSetting -Path $envPath -Name "GATEWAY_MODE" -Value $mode
-            Set-DotEnvSetting -Path $envPath -Name "CADDY_CONFIG_FILE" -Value "./caddy/Caddyfile.$mode"
+            Set-DotEnvSetting -Path $envPath -Name "NGINX_CONFIG_FILE" -Value $template
             Write-Host "Gateway mode '$mode' is active and recorded in .env."
+            if ($mode -in @("internal", "migration")) {
+                $certsDir = Get-SettingOrDefault -Name "TLS_CERTS_DIR" -FileSettings $fileSettings -Default "./secrets/tls"
+                Write-Host "Install this root certificate into every client trust store: $certsDir/internal-ca.crt"
+            }
         }
 
         "observability" {

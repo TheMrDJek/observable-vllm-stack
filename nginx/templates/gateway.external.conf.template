@@ -1,0 +1,23 @@
+# Режим 'external': то же одно имя, но на готовой паре
+# ${TLS_CERTS_DIR}/${TLS_CERT_FILE} и ${TLS_CERTS_DIR}/${TLS_KEY_FILE}.
+# Файл сертификата должен содержать полную цепочку без корня.
+#
+# Ключ обязан быть читаемым для UID 101, под которым работает nginx.
+# Проверку выполняет 'model.sh gateway external' до перезапуска.
+
+server {
+	listen 8443 ssl;
+	http2 on;
+	server_name ${PUBLIC_HOST}.${DNS_ZONE};
+
+	ssl_certificate     /etc/nginx/certs/${TLS_CERT_FILE};
+	ssl_certificate_key /etc/nginx/certs/${TLS_KEY_FILE};
+
+	include /etc/nginx/routes/api.conf;
+
+	location / {
+		allow ${ADMIN_ALLOW_CIDR};
+		deny all;
+		include /etc/nginx/routes/admin.conf;
+	}
+}
